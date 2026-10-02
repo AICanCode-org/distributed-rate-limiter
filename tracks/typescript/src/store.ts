@@ -1,5 +1,7 @@
 // Storage behind one interface: InMemoryStore (unit tests; v1.1 degraded mode) and RedisStore (M3).
 // A store keeps tenants, answers limiter checks atomically and counts usage per minute.
+import { readFileSync } from "node:fs";
+import path from "node:path";
 import { Redis } from "ioredis";
 import { slidingWindow, tokenBucket, type BucketState, type WindowState } from "./algorithms.js";
 import { systemClock, toMs, type Clock } from "./clock.js";
@@ -13,11 +15,6 @@ import {
   type Tenant,
   type UsagePoint,
 } from "./models.js";
-
-/** Starter helper: marks code you still have to write (returns `never`, so types still check). */
-const todo = (what: string): never => {
-  throw new Error(what);
-};
 
 export interface Store {
   ping(): Promise<boolean>;
@@ -147,17 +144,36 @@ export class InMemoryStore implements Store {
 
 // ---------------------------------------------------------------------------------------------------
 export function tenantToHash(t: Tenant): Record<string, string> {
-  // TODO(phase-3 M3): the tenant as a flat string map for HSET: id, name, algorithm, limit, windowSeconds,
-  //   keyHash, keyPrefix, createdAt/updatedAt as epoch ms.
-  throw new Error("TODO(phase-3 M3): tenantToHash");
+  return {
+    id: t.id,
+    name: t.name,
+    algorithm: t.policy.algorithm,
+    limit: String(t.policy.limit),
+    windowSeconds: String(t.policy.windowSeconds),
+    keyHash: t.keyHash,
+    keyPrefix: t.keyPrefix,
+    createdAt: String(toMs(t.createdAt)),
+    updatedAt: String(toMs(t.updatedAt)),
+  };
 }
 
 export function tenantFromHash(h: Record<string, string>): Tenant {
-  // TODO(phase-3 M3): the reverse of tenant_to_hash (numbers parsed, epoch ms back to UTC datetimes).
-  throw new Error("TODO(phase-3 M3): tenantFromHash");
+  return {
+    id: h.id!,
+    name: h.name!,
+    policy: {
+      algorithm: h.algorithm as Policy["algorithm"],
+      limit: Number(h.limit),
+      windowSeconds: Number(h.windowSeconds),
+    },
+    keyHash: h.keyHash!,
+    keyPrefix: h.keyPrefix!,
+    createdAt: new Date(Number(h.createdAt)),
+    updatedAt: new Date(Number(h.updatedAt)),
+  };
 }
 
-export type LimiterScript = (
+type LimiterScript = (
   k1: string,
   k2: string,
   ...args: (string | number)[]
@@ -167,11 +183,15 @@ export type LimiterScript = (
 export class RedisStore implements Store {
   constructor(
     readonly redis: Redis,
-    readonly luaDir: string,
+    luaDir: string,
   ) {
-    // TODO(phase-3 M3): load spec/lua/token_bucket.lua and sliding_window.lua (you wrote them in Phase 2)
-    //   with redis.defineCommand(name, { numberOfKeys: 2, lua }): it sends EVALSHA and falls back to EVAL
-    //   when Redis answers NOSCRIPT.
+    // defineCommand sends EVALSHA and falls back to EVAL when Redis answers NOSCRIPT.
+    for (const [name, file] of [
+      ["rgTokenBucket", "token_bucket.lua"],
+      ["rgSlidingWindow", "sliding_window.lua"],
+    ] as const) {
+      redis.defineCommand(name, { numberOfKeys: 2, lua: readFileSync(path.join(luaDir, file), "utf8") });
+    }
   }
 
   static fromUrl(url: string, timeoutMs: number, luaDir: string): RedisStore {
@@ -202,43 +222,83 @@ export class RedisStore implements Store {
     }
   }
 
-  async createTenant(tenant: Tenant): Promise<void> {
-    // TODO(phase-3 M3): SADD rg:tenants <id>; 0 means the id exists -> DuplicateError (Redis decides the
-    //   race, not the app). Then in ONE MULTI/EXEC: HSET the tenant hash and SET rg:key:<hash> <id>.
-    return todo("TODO(phase-3 M3): RedisStore.createTenant");
+  async createTenant(tenant: Tenant) {
+    await this.call(async () => {
+      // SADD answers 0 when the id is already a member: Redis, not the app, decides the race.
+      if ((await this.redis.sadd(keys.TENANTS, tenant.id)) === 0) throw new DuplicateError(tenant.id);
+      await this.redis
+        .multi()
+        .hset(keys.tenantKey(tenant.id), tenantToHash(tenant))
+        .set(keys.apiKeyKey(tenant.keyHash), tenant.id)
+        .exec();
+    });
   }
 
-  async getTenant(tenantId: string): Promise<Tenant | null> {
-    // TODO(phase-3 M3): HGETALL rg:tenant:<id>; empty -> null.
-    return todo("TODO(phase-3 M3): RedisStore.getTenant");
+  async getTenant(tenantId: string) {
+    const h = await this.call(() => this.redis.hgetall(keys.tenantKey(tenantId)));
+    return Object.keys(h).length ? tenantFromHash(h) : null;
   }
 
-  async listTenants(): Promise<Tenant[]> {
-    // TODO(phase-3 M3): SMEMBERS rg:tenants, sorted by id, then HGETALL each one in a pipeline.
-    return todo("TODO(phase-3 M3): RedisStore.listTenants");
+  async listTenants() {
+    return this.call(async () => {
+      const ids = (await this.redis.smembers(keys.TENANTS)).sort();
+      const pipe = this.redis.pipeline();
+      for (const id of ids) pipe.hgetall(keys.tenantKey(id));
+      const results = (await pipe.exec()) ?? [];
+      return results
+        .map(([err, h]) => {
+          if (err) throw err;
+          return h as Record<string, string>;
+        })
+        .filter((h) => Object.keys(h).length > 0)
+        .map(tenantFromHash);
+    });
   }
 
-  async findByKeyHash(keyHash: string): Promise<Tenant | null> {
-    // TODO(phase-3 M3): GET rg:key:<hash> -> tenant id -> get_tenant; unknown -> null.
-    return todo("TODO(phase-3 M3): RedisStore.findByKeyHash");
+  async findByKeyHash(keyHash: string) {
+    const id = await this.call(() => this.redis.get(keys.apiKeyKey(keyHash)));
+    return id ? this.getTenant(id) : null;
   }
 
-  async saveTenant(tenant: Tenant, oldKeyHash: string): Promise<void> {
-    // TODO(phase-3 M3): ONE MULTI/EXEC: HSET the hash; if the key hash changed, DEL the old rg:key:<old> and
-    //   SET the new one (the old key stops working at once).
-    return todo("TODO(phase-3 M3): RedisStore.saveTenant");
+  async saveTenant(tenant: Tenant, oldKeyHash: string) {
+    await this.call(async () => {
+      const tx = this.redis.multi().hset(keys.tenantKey(tenant.id), tenantToHash(tenant)); // MULTI/EXEC: all or nothing
+      if (oldKeyHash !== tenant.keyHash) {
+        tx.del(keys.apiKeyKey(oldKeyHash)).set(keys.apiKeyKey(tenant.keyHash), tenant.id);
+      }
+      await tx.exec();
+    });
   }
 
-  async deleteTenant(tenant: Tenant): Promise<void> {
-    // TODO(phase-3 M3): ONE MULTI/EXEC: DEL the tenant hash, its rg:key and its usage ring, SREM from
-    //   rg:tenants; then reset() the limiter keys.
-    return todo("TODO(phase-3 M3): RedisStore.deleteTenant");
+  async deleteTenant(tenant: Tenant) {
+    await this.call(() =>
+      this.redis
+        .multi()
+        .del(keys.tenantKey(tenant.id), keys.apiKeyKey(tenant.keyHash), keys.usageKey(tenant.id))
+        .srem(keys.TENANTS, tenant.id)
+        .exec(),
+    );
+    await this.reset(tenant.id);
   }
 
-  async reset(tenantId: string): Promise<number> {
-    // TODO(phase-3 M3): SCAN (never KEYS) for tenant_pattern, keep the usage ring, DEL the rest; return how
-    //   many were deleted.
-    return todo("TODO(phase-3 M3): RedisStore.reset");
+  async reset(tenantId: string) {
+    return this.call(async () => {
+      // SCAN walks the keyspace in small steps; KEYS would block Redis for everyone.
+      const doomed: string[] = [];
+      let cursor = "0";
+      do {
+        const [next, batch] = await this.redis.scan(
+          cursor,
+          "MATCH",
+          keys.tenantPattern(tenantId),
+          "COUNT",
+          500,
+        );
+        cursor = next;
+        doomed.push(...batch.filter((k) => k !== keys.usageKey(tenantId)));
+      } while (cursor !== "0");
+      return doomed.length ? await this.redis.del(...new Set(doomed)) : 0;
+    });
   }
 
   async check(
@@ -248,16 +308,37 @@ export class RedisStore implements Store {
     cost: number,
     nowMs?: number,
   ): Promise<Decision> {
-    // TODO(phase-3 M3): ONE script call (EVALSHA, EVAL on NOSCRIPT): token_bucket.lua or sliding_window.lua
-    //   with KEYS = [limiter key, usage key] and ARGV = [limit, window_ms, cost (, now_ms for tests)]; it
-    //   returns [allowed 0/1, remaining, retryAfterMs, resetAfterMs].
-    throw new Error("TODO(phase-3 M3): RedisStore.check");
+    const script = (this.redis as unknown as Record<string, LimiterScript>)[
+      policy.algorithm === TOKEN_BUCKET ? "rgTokenBucket" : "rgSlidingWindow"
+    ]!;
+    const args: number[] = [policy.limit, windowMs(policy), cost, ...(nowMs === undefined ? [] : [nowMs])];
+    const [allowed, remaining, retry, reset] = await this.call(() =>
+      script.call(
+        this.redis,
+        keys.limiterKey(tenantId, policy.algorithm, resource),
+        keys.usageKey(tenantId),
+        ...args,
+      ),
+    );
+    return { allowed: allowed === 1, remaining, retryAfterMs: retry, resetAfterMs: reset };
   }
 
   async usage(tenantId: string, minutes: number): Promise<UsagePoint[]> {
-    // TODO(phase-3 M3): TIME gives Redis' clock; HGETALL the ring; for each of the last n minutes slot =
-    //   usage_slot(minute): use a<slot>/d<slot> only if m<slot> == minute, else zeros. Oldest first.
-    throw new Error("TODO(phase-3 M3): RedisStore.usage");
+    return this.call(async () => {
+      const [seconds, micros] = await this.redis.time();
+      const current = Math.floor((Number(seconds) * 1000 + Math.floor(Number(micros) / 1000)) / 60_000);
+      const ring = await this.redis.hgetall(keys.usageKey(tenantId));
+      const out: UsagePoint[] = [];
+      for (let minute = current - minutes + 1; minute <= current; minute++) {
+        const slot = keys.usageSlot(minute);
+        if (ring[`m${slot}`] === String(minute)) {
+          out.push({ minute, allowed: Number(ring[`a${slot}`] ?? 0), denied: Number(ring[`d${slot}`] ?? 0) });
+        } else {
+          out.push({ minute, allowed: 0, denied: 0 });
+        }
+      }
+      return out;
+    });
   }
 
   async close() {

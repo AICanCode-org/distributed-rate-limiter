@@ -28,11 +28,21 @@ export function tokenBucket(
   cost: number,
   now: number,
 ): [BucketState, Decision] {
-  // TODO(phase-3 M2): capacity = limit, refilled continuously at limit tokens per window_ms; a new bucket
-  //   starts full. Refill by elapsed ms (never past limit), allow when tokens >= cost and subtract, else retry
-  //   = ceil((cost - tokens) * window / limit). remaining = floor(tokens), reset = ceil((limit - tokens) *
-  //   window / limit). See ADR-0001 and docs/phase-3.
-  throw new Error("TODO(phase-3 M2): tokenBucket");
+  let tokens = state === null ? limit : state.tokens; // a new bucket starts full
+  let ts = state === null ? now : state.ts;
+  if (now > ts) {
+    tokens = Math.min(limit, tokens + ((now - ts) * limit) / windowMs);
+    ts = now;
+  }
+  const allowed = tokens >= cost;
+  let retry = 0;
+  if (allowed) tokens -= cost;
+  else retry = Math.ceil(((cost - tokens) * windowMs) / limit);
+  const reset = Math.ceil(((limit - tokens) * windowMs) / limit);
+  return [
+    { tokens, ts },
+    { allowed, remaining: Math.floor(tokens), retryAfterMs: retry, resetAfterMs: reset },
+  ];
 }
 
 /**
@@ -46,9 +56,37 @@ export function slidingWindow(
   cost: number,
   now: number,
 ): [WindowState, Decision] {
-  // TODO(phase-3 M2): sliding window COUNTER: idx = now // window, elapsed = now - idx * window; roll the
-  //   state (same window, next window: prev = cur, older: both 0, clock went backwards: keep the stored
-  //   window). estimate = prev * (window - elapsed) + cur * window (integers!); allow when estimate + cost *
-  //   window <= limit * window. Compute retry and reset exactly as the tests describe.
-  throw new Error("TODO(phase-3 M2): slidingWindow");
+  let idx = Math.floor(now / windowMs);
+  let elapsed = now - idx * windowMs;
+  let cur = 0;
+  let prev = 0;
+  if (state === null) {
+    // a new window pair
+  } else if (idx < state.w) {
+    // the clock went backwards: stay in the stored window
+    [idx, elapsed, cur, prev] = [state.w, 0, state.cur, state.prev];
+  } else if (idx === state.w) {
+    [cur, prev] = [state.cur, state.prev];
+  } else if (idx === state.w + 1) {
+    prev = state.cur;
+  }
+  let weighted = prev * (windowMs - elapsed) + cur * windowMs;
+  let retry = 0;
+  const allowed = weighted + cost * windowMs <= limit * windowMs;
+  if (allowed) {
+    cur += cost;
+    weighted += cost * windowMs;
+  } else if (cur + cost <= limit) {
+    // fits in this window once enough of the previous window has slid out
+    retry = windowMs - Math.floor(((limit - cost - cur) * windowMs) / prev) - elapsed;
+  } else {
+    // only fits in the next window, once enough of this one has slid out
+    retry = windowMs - elapsed + windowMs - Math.floor(((limit - cost) * windowMs) / cur);
+  }
+  const remaining = Math.max(0, Math.floor((limit * windowMs - weighted) / windowMs));
+  const reset = cur > 0 ? 2 * windowMs - elapsed : prev > 0 ? windowMs - elapsed : 0;
+  return [
+    { w: idx, cur, prev },
+    { allowed, remaining, retryAfterMs: retry, resetAfterMs: reset },
+  ];
 }

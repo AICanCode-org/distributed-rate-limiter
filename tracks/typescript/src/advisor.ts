@@ -8,6 +8,7 @@
 // The LLM is any OpenAI-compatible /chat/completions endpoint: Ollama locally, or a free Gemini/Groq key.
 import { isoMs } from "./clock.js";
 import type { Policy, Tenant, UsagePoint } from "./models.js";
+import { MAX_LIMIT } from "./validation.js";
 
 export const ACTIONS = ["KEEP", "RAISE_LIMIT", "LOWER_LIMIT", "INVESTIGATE"] as const;
 export type Action = (typeof ACTIONS)[number];
@@ -47,27 +48,91 @@ export interface AdviceResult {
   advice: Advice;
 }
 
-export const total = (s: UsageStats) => s.allowed + s.denied;
+const total = (s: UsageStats) => s.allowed + s.denied;
 
 export function summarize(policy: Policy, points: UsagePoint[]): UsageStats {
-  // TODO(phase-3 M5): the numbers the advice is based on, computed by CODE (never by the LLM): totals,
-  //   deniedPercent (integer, rounded down), peak minute (first one wins) and its denials, median and p90 of
-  //   the ACTIVE minutes, capacity per minute = limit * 60 // windowSeconds. See the advisor tests for the
-  //   exact definitions.
-  throw new Error("TODO(phase-3 M5): summarize");
+  const demand = points.map((p) => p.allowed + p.denied);
+  const active = demand.filter((d) => d > 0).sort((a, b) => a - b);
+  const peak = Math.max(0, ...demand);
+  const peakIndex = peak > 0 ? demand.indexOf(peak) : -1;
+  const n = active.length;
+  const allowed = points.reduce((sum, p) => sum + p.allowed, 0);
+  const denied = points.reduce((sum, p) => sum + p.denied, 0);
+  return {
+    minutes: points.length,
+    allowed,
+    denied,
+    deniedPercent: allowed + denied ? Math.floor((denied * 100) / (allowed + denied)) : 0,
+    peak,
+    peakMinute: peakIndex >= 0 ? points[peakIndex]!.minute : null,
+    peakDenied: peakIndex >= 0 ? points[peakIndex]!.denied : 0,
+    median: n ? active[Math.floor((n - 1) / 2)]! : 0,
+    p90: n ? active[Math.floor((9 * n + 9) / 10) - 1]! : 0,
+    activeMinutes: n,
+    capacityPerMinute: Math.floor((policy.limit * 60) / policy.windowSeconds),
+  };
 }
 
-export const hhmm = (minute: number) => isoMs(minute * 60_000).slice(11, 16);
+const hhmm = (minute: number) => isoMs(minute * 60_000).slice(11, 16);
 
 /** Five rules, checked in order. Deterministic: the same numbers always give the same advice. */
 export class RuleAdvisor {
   advise(policy: Policy, s: UsageStats): Advice {
-    // TODO(phase-3 M5): five rules in order: no traffic -> KEEP; a spike (>= 3 active minutes, peak >= 5x
-    //   median, at least half the denials in the peak minute) -> INVESTIGATE; >= 10 % denied -> RAISE_LIMIT to
-    //   the p90 per minute scaled to the window + 20 % (at most 10x and MAX_LIMIT); >= 10 active minutes and
-    //   peak under a quarter of capacity -> LOWER_LIMIT to twice the peak; else KEEP. The exact summary texts
-    //   are in the tests.
-    throw new Error("TODO(phase-3 M5): RuleAdvisor.advise");
+    const { limit, windowSeconds: w } = policy;
+    if (total(s) === 0) {
+      return {
+        action: "KEEP",
+        limit: null,
+        summary: `No requests in the last ${s.minutes} minutes: keep the current policy.`,
+      };
+    }
+    if (
+      s.denied > 0 &&
+      s.activeMinutes >= 3 &&
+      s.peak >= 5 * Math.max(1, s.median) &&
+      2 * s.peakDenied >= s.denied
+    ) {
+      const ratio = Math.floor(s.peak / Math.max(1, s.median));
+      return {
+        action: "INVESTIGATE",
+        limit: null,
+        summary:
+          `Spike at ${hhmm(s.peakMinute ?? 0)} UTC: ${s.peak} requests in one minute, ${ratio}x the usual ` +
+          `${s.median}. ${s.peakDenied} of the ${s.denied} denials happened in that minute, which looks like ` +
+          "a retry storm or abuse, not growth. Keep the limit and check the client.",
+      };
+    }
+    if (s.deniedPercent >= 10) {
+      const wanted = Math.floor((s.p90 * w * 12 + 599) / 600); // p90 per minute, scaled to the window, + 20 % headroom
+      const next = Math.min(MAX_LIMIT, limit * 10, Math.max(limit + 1, wanted));
+      if (next > limit) {
+        return {
+          action: "RAISE_LIMIT",
+          limit: next,
+          summary:
+            `${s.deniedPercent}% of requests were denied (${s.denied} of ${total(s)}). Steady demand is about ` +
+            `${s.p90} per minute (90th percentile) against a capacity of ${s.capacityPerMinute} per minute. ` +
+            `Raise the limit to ${next} per ${w} s (20% headroom).`,
+        };
+      }
+    }
+    if (s.activeMinutes >= 10 && limit >= 2 && s.peak * 4 * w <= limit * 60) {
+      const next = Math.max(1, Math.floor((s.peak * w * 2 + 59) / 60));
+      return {
+        action: "LOWER_LIMIT",
+        limit: next,
+        summary:
+          `Peak demand was ${s.peak} per minute, under a quarter of the capacity of ${s.capacityPerMinute} ` +
+          `per minute. ${next} per ${w} s (twice the peak) still fits and limits the damage if the key leaks.`,
+      };
+    }
+    return {
+      action: "KEEP",
+      limit: null,
+      summary:
+        `${s.deniedPercent}% denied and a peak of ${s.peak} per minute against a capacity of ` +
+        `${s.capacityPerMinute} per minute: the current policy fits.`,
+    };
   }
 }
 
@@ -86,10 +151,28 @@ export class LlmClient implements Chat {
   ) {}
 
   async chat(system: string, user: string, maxTokens: number): Promise<string> {
-    // TODO(phase-3 M5): POST {base}/chat/completions (OpenAI-compatible) with model, temperature 0,
-    //   max_tokens and the two messages, a timeout of LLM_TIMEOUT_MS, Bearer LLM_API_KEY if set; return
-    //   choices[0].message.content; anything wrong raises.
-    throw new Error("TODO(phase-3 M5): LlmClient.chat");
+    const response = await this.fetchFn(`${this.baseUrl}/chat/completions`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...(this.apiKey ? { Authorization: `Bearer ${this.apiKey}` } : {}),
+      },
+      body: JSON.stringify({
+        model: this.model,
+        temperature: 0,
+        max_tokens: maxTokens,
+        messages: [
+          { role: "system", content: system },
+          { role: "user", content: user },
+        ],
+      }),
+      signal: AbortSignal.timeout(this.timeoutMs),
+    });
+    if (!response.ok) throw new Error(`LLM HTTP ${response.status}`);
+    const data = (await response.json()) as { choices?: { message?: { content?: unknown } }[] };
+    const text = data.choices?.[0]?.message?.content;
+    if (typeof text !== "string" || !text.trim()) throw new Error("empty LLM response");
+    return text;
   }
 }
 
@@ -101,32 +184,78 @@ export const SYSTEM_PROMPT =
   "INVESTIGATE means a sudden spike that looks like abuse or a retry storm; RAISE_LIMIT means steady demand " +
   "above the limit; LOWER_LIMIT means a limit far above any real use; otherwise KEEP.";
 
-export function statsJson(s: UsageStats): Record<string, unknown> {
-  // TODO(phase-3 M5): the UsageStats as the JSON object of the API (camelCase names, peakMinute as an ISO
-  //   time or null).
-  throw new Error("TODO(phase-3 M5): statsJson");
-}
+export const statsJson = (s: UsageStats) => ({
+  minutes: s.minutes,
+  allowed: s.allowed,
+  denied: s.denied,
+  deniedPercent: s.deniedPercent,
+  peakPerMinute: s.peak,
+  peakMinute: s.peakMinute === null ? null : isoMs(s.peakMinute * 60_000),
+  peakMinuteDenied: s.peakDenied,
+  medianPerMinute: s.median,
+  p90PerMinute: s.p90,
+  activeMinutes: s.activeMinutes,
+  capacityPerMinute: s.capacityPerMinute,
+});
 
-export function stripFences(text: string): string {
-  // TODO(phase-3 M5): helper: models like to wrap JSON in ```json fences: remove them.
-  throw new Error("TODO(phase-3 M5): stripFences");
+function stripFences(text: string): string {
+  let t = text.trim();
+  if (t.startsWith("```")) {
+    const newline = t.indexOf("\n");
+    t = newline === -1 ? "" : t.slice(newline + 1);
+    const end = t.lastIndexOf("```");
+    if (end !== -1) t = t.slice(0, end);
+  }
+  return t.trim();
 }
 
 /** Validate the model's answer like user input. Anything unexpected throws. */
 export function parseAdvice(text: string, policy: Policy): Advice {
-  // TODO(phase-3 M5): treat the model's answer like user input: JSON object, a known action, a limit only for
-  //   RAISE (above the current, at most 10x and MAX_LIMIT) or LOWER (1..current-1), a 1-400 character summary
-  //   (whitespace collapsed). Anything else raises.
-  throw new Error("TODO(phase-3 M5): parseAdvice");
+  const data: unknown = JSON.parse(stripFences(text));
+  if (typeof data !== "object" || data === null || Array.isArray(data))
+    throw new Error("advice must be a JSON object");
+  const body = data as Record<string, unknown>;
+  const action = body.action;
+  if (typeof action !== "string" || !(ACTIONS as readonly string[]).includes(action)) {
+    throw new Error(`unknown action ${String(action)}`);
+  }
+  const limit = body.limit ?? null;
+  if (action === "RAISE_LIMIT" || action === "LOWER_LIMIT") {
+    if (typeof limit !== "number" || !Number.isSafeInteger(limit))
+      throw new Error("limit must be an integer");
+    if (
+      action === "RAISE_LIMIT" &&
+      !(limit > policy.limit && limit <= Math.min(MAX_LIMIT, policy.limit * 10))
+    ) {
+      throw new Error("raised limit out of range");
+    }
+    if (action === "LOWER_LIMIT" && !(limit >= 1 && limit < policy.limit))
+      throw new Error("lowered limit out of range");
+  } else if (limit !== null) {
+    throw new Error(`${action} takes no limit`);
+  }
+  const summary = body.summary;
+  if (typeof summary !== "string" || summary.trim().length < 1 || summary.trim().length > SUMMARY_MAX) {
+    throw new Error("summary must be 1-400 characters");
+  }
+  return {
+    action: action as Action,
+    limit: limit as number | null,
+    summary: summary.trim().split(/\s+/).join(" "),
+  };
 }
 
 export class LlmAdvisor {
   constructor(private readonly client: Chat) {}
 
   async advise(tenant: Tenant, s: UsageStats): Promise<Advice> {
-    // TODO(phase-3 M5): send ONLY numbers: <stats>{policy, stats}</stats> with SYSTEM_PROMPT and 300 max
-    //   tokens (no tenant name, no keys: prompt injection has nothing to work with); parse_advice the answer.
-    throw new Error("TODO(phase-3 M5): LlmAdvisor.advise");
+    const p = tenant.policy;
+    const facts = {
+      policy: { algorithm: p.algorithm, limit: p.limit, windowSeconds: p.windowSeconds },
+      stats: statsJson(s),
+    };
+    const answer = await this.client.chat(SYSTEM_PROMPT, `<stats>${JSON.stringify(facts)}</stats>`, 300);
+    return parseAdvice(answer, p);
   }
 }
 
@@ -138,9 +267,15 @@ export class AdvisorService {
   ) {}
 
   async advise(tenant: Tenant, s: UsageStats): Promise<AdviceResult> {
-    // TODO(phase-3 M5): with an LLM: try it; ANY failure (timeout, HTTP error, invalid answer) -> the rules
-    //   with fallback=true and a warning log. Without one: the rules, fallback=false. Advice is never applied
-    //   automatically.
-    throw new Error("TODO(phase-3 M5): AdvisorService.advise");
+    if (this.llm !== null) {
+      try {
+        return { provider: "llm", fallback: false, advice: await this.llm.advise(tenant, s) };
+      } catch (err) {
+        // ANY failure means: use the rules
+        this.warn(`LLM advice failed, using the rules: ${err instanceof Error ? err.name : "error"}`);
+        return { provider: "rules", fallback: true, advice: this.rules.advise(tenant.policy, s) };
+      }
+    }
+    return { provider: "rules", fallback: false, advice: this.rules.advise(tenant.policy, s) };
   }
 }

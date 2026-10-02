@@ -1,6 +1,6 @@
 // M1: input validation. Every message is identical in all three tracks (clients and tests rely on them).
 import { validationError } from "./errors.js";
-import { type Policy } from "./models.js";
+import { ALGORITHMS, type Algorithm, type Policy } from "./models.js";
 
 export const TENANT_ID_RE = /^[a-z0-9][a-z0-9-]{1,30}[a-z0-9]$/;
 export const RESOURCE_RE = /^[a-z0-9._:-]{1,64}$/;
@@ -20,51 +20,67 @@ export function requireObject(value: unknown): Record<string, unknown> {
 }
 
 /** JSON numbers: 1.0 === 1 in JavaScript, so "integer" means a safe integer value. */
-export const isInt = (value: unknown): value is number =>
-  typeof value === "number" && Number.isSafeInteger(value);
+const isInt = (value: unknown): value is number => typeof value === "number" && Number.isSafeInteger(value);
 
 /** Tenant ids end up inside Redis keys, so only a small, safe alphabet is accepted (no ':', '{', '*'). */
 export function tenantId(value: unknown): string {
-  // TODO(phase-3 M1): a string (400 'id is required') matching TENANT_ID_RE: 3-32 characters of a-z, 0-9 and
-  //   inner hyphens (400 'id must be 3-32 characters of a-z, 0-9 and inner hyphens'). Ids end up inside Redis
-  //   keys, so ':', '{' and '*' must never get through.
-  throw new Error("TODO(phase-3 M1): tenantId");
+  if (typeof value !== "string") throw validationError("id is required");
+  if (!TENANT_ID_RE.test(value))
+    throw validationError("id must be 3-32 characters of a-z, 0-9 and inner hyphens");
+  return value;
 }
 
-export function isTenantId(value: string): boolean {
-  // TODO(phase-3 M1): true when the string matches TENANT_ID_RE (used to answer 404 for impossible ids
-  //   without asking Redis).
-  throw new Error("TODO(phase-3 M1): isTenantId");
-}
+export const isTenantId = (value: string): boolean => TENANT_ID_RE.test(value);
 
 export function tenantName(value: unknown): string {
-  // TODO(phase-3 M1): a string (400 'name is required'), trimmed, 1-80 characters counted as code points (400
-  //   'name must be 1-80 characters').
-  throw new Error("TODO(phase-3 M1): tenantName");
+  if (typeof value !== "string") throw validationError("name is required");
+  const name = value.trim();
+  const length = [...name].length;
+  if (length < 1 || length > MAX_NAME) throw validationError("name must be 1-80 characters");
+  return name;
 }
 
 export function policy(value: unknown): Policy {
-  // TODO(phase-3 M1): an object (400 'policy is required'); algorithm TOKEN_BUCKET or SLIDING_WINDOW; limit
-  //   an INTEGER 1..MAX_LIMIT (booleans and floats are not integers); windowSeconds an integer
-  //   1..MAX_WINDOW_SECONDS. Messages: see the validation tests.
-  throw new Error("TODO(phase-3 M1): policy");
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw validationError("policy is required");
+  }
+  const body = value as Record<string, unknown>;
+  const algorithm = body.algorithm;
+  if (typeof algorithm !== "string" || !(ALGORITHMS as readonly string[]).includes(algorithm)) {
+    throw validationError("policy.algorithm must be TOKEN_BUCKET or SLIDING_WINDOW");
+  }
+  const limit = body.limit;
+  if (!isInt(limit) || limit < 1 || limit > MAX_LIMIT) {
+    throw validationError("policy.limit must be an integer between 1 and 100000");
+  }
+  const windowSeconds = body.windowSeconds;
+  if (!isInt(windowSeconds) || windowSeconds < 1 || windowSeconds > MAX_WINDOW_SECONDS) {
+    throw validationError("policy.windowSeconds must be an integer between 1 and 86400");
+  }
+  return { algorithm: algorithm as Algorithm, limit, windowSeconds };
 }
 
 export function resource(value: unknown): string {
-  // TODO(phase-3 M1): missing/null -> DEFAULT_RESOURCE ('default'); otherwise a string matching RESOURCE_RE
-  //   (1-64 of a-z 0-9 . _ : -), else 400.
-  throw new Error("TODO(phase-3 M1): resource");
+  if (value === undefined || value === null) return DEFAULT_RESOURCE;
+  if (typeof value !== "string" || !RESOURCE_RE.test(value)) {
+    throw validationError("resource must be 1-64 characters of a-z, 0-9, '.', '_', ':' and '-'");
+  }
+  return value;
 }
 
 export function cost(value: unknown): number {
-  // TODO(phase-3 M1): missing/null -> 1; otherwise an integer 1..MAX_COST (1000), else 400 'cost must be an
-  //   integer between 1 and 1000'.
-  throw new Error("TODO(phase-3 M1): cost");
+  if (value === undefined || value === null) return 1;
+  if (!isInt(value) || value < 1 || value > MAX_COST) {
+    throw validationError("cost must be an integer between 1 and 1000");
+  }
+  return value;
 }
 
 /** A query string: missing -> 60; ASCII digits only, 1..120. */
 export function minutes(value: string | undefined): number {
-  // TODO(phase-3 M1): a query string: missing -> DEFAULT_MINUTES (60); ASCII digits only and 1..MAX_MINUTES
-  //   (120), else 400 'minutes must be an integer between 1 and 120'.
-  throw new Error("TODO(phase-3 M1): minutes");
+  if (value === undefined) return DEFAULT_MINUTES;
+  if (!/^[0-9]+$/.test(value) || Number(value) < 1 || Number(value) > MAX_MINUTES) {
+    throw validationError("minutes must be an integer between 1 and 120");
+  }
+  return Number(value);
 }

@@ -1,8 +1,10 @@
 // M4: tenants (the admin API's business logic) and API-key authentication.
 import type { Clock } from "./clock.js";
+import { DuplicateError, invalidApiKey, notFound, tenantExists } from "./errors.js";
 import type { Tenant, UsagePoint } from "./models.js";
-import { newApiKey } from "./security.js";
+import { hashApiKey, keyPrefix, looksLikeApiKey, newApiKey } from "./security.js";
 import type { Store } from "./store.js";
+import * as v from "./validation.js";
 
 export class TenantService {
   constructor(
@@ -13,53 +15,81 @@ export class TenantService {
 
   /** Returns the tenant and its API key. The key is shown ONCE; only its hash is stored. */
   async create(payload: unknown): Promise<[Tenant, string]> {
-    // TODO(phase-3 M4): validate id, name and policy; new API key; store only its hash and prefix (the key is
-    //   returned ONCE); createdAt = updatedAt = the injected clock. DuplicateError -> 409 tenant-exists.
-    throw new Error("TODO(phase-3 M4): TenantService.create");
+    const body = v.requireObject(payload);
+    const id = v.tenantId(body.id);
+    const name = v.tenantName(body.name);
+    const policy = v.policy(body.policy);
+    const apiKey = this.newKey();
+    const now = this.clock();
+    const tenant: Tenant = {
+      id,
+      name,
+      policy,
+      keyHash: hashApiKey(apiKey),
+      keyPrefix: keyPrefix(apiKey),
+      createdAt: now,
+      updatedAt: now,
+    };
+    try {
+      await this.store.createTenant(tenant);
+    } catch (err) {
+      if (err instanceof DuplicateError) throw tenantExists();
+      throw err;
+    }
+    return [tenant, apiKey];
   }
 
   list(): Promise<Tenant[]> {
-    // TODO(phase-3 M4): all tenants, sorted by id.
-    throw new Error("TODO(phase-3 M4): TenantService.list");
+    return this.store.listTenants();
   }
 
   async get(tenantId: string): Promise<Tenant> {
-    // TODO(phase-3 M4): an id that is not a valid tenant id is simply 404 not-found 'tenant' (never 400,
-    //   never a Redis call); unknown -> 404.
-    throw new Error("TODO(phase-3 M4): TenantService.get");
+    // An id that cannot exist is simply not found (never a 400, never a Redis call).
+    const tenant = v.isTenantId(tenantId) ? await this.store.getTenant(tenantId) : null;
+    if (tenant === null) throw notFound("tenant");
+    return tenant;
   }
 
   async setPolicy(tenantId: string, payload: unknown): Promise<Tenant> {
-    // TODO(phase-3 M4): get, validate the new policy, bump updatedAt, save (the key hash does not change).
-    throw new Error("TODO(phase-3 M4): TenantService.setPolicy");
+    const tenant = await this.get(tenantId);
+    const updated: Tenant = { ...tenant, policy: v.policy(payload), updatedAt: this.clock() };
+    await this.store.saveTenant(updated, tenant.keyHash);
+    return updated;
   }
 
   /** A new key; the old one stops working at once. */
   async rotateKey(tenantId: string): Promise<[Tenant, string]> {
-    // TODO(phase-3 M4): get, new key, save with the new hash/prefix (the old key stops working at once),
-    //   return it ONCE.
-    throw new Error("TODO(phase-3 M4): TenantService.rotateKey");
+    const tenant = await this.get(tenantId);
+    const apiKey = this.newKey();
+    const updated: Tenant = {
+      ...tenant,
+      keyHash: hashApiKey(apiKey),
+      keyPrefix: keyPrefix(apiKey),
+      updatedAt: this.clock(),
+    };
+    await this.store.saveTenant(updated, tenant.keyHash);
+    return [updated, apiKey];
   }
 
   async delete(tenantId: string): Promise<void> {
-    // TODO(phase-3 M4): get (404 rules) then delete_tenant.
-    throw new Error("TODO(phase-3 M4): TenantService.delete");
+    await this.store.deleteTenant(await this.get(tenantId));
   }
 
   async reset(tenantId: string): Promise<number> {
-    // TODO(phase-3 M4): get (404 rules) then reset the limiter keys.
-    throw new Error("TODO(phase-3 M4): TenantService.reset");
+    return this.store.reset((await this.get(tenantId)).id);
   }
 
   async usage(tenantId: string, minutesParam: string | undefined): Promise<[Tenant, number, UsagePoint[]]> {
-    // TODO(phase-3 M4): validate minutes, get (404 rules), read the usage points.
-    throw new Error("TODO(phase-3 M4): TenantService.usage");
+    const minutes = v.minutes(minutesParam);
+    const tenant = await this.get(tenantId);
+    return [tenant, minutes, await this.store.usage(tenant.id, minutes)];
   }
 
   /** X-API-Key -> tenant. Malformed keys are rejected without touching Redis. */
   async authenticate(apiKey: string | undefined): Promise<Tenant> {
-    // TODO(phase-3 M4): malformed key -> 401 invalid-api-key WITHOUT touching Redis; otherwise find the
-    //   tenant by the key's hash; unknown -> 401 invalid-api-key.
-    throw new Error("TODO(phase-3 M4): TenantService.authenticate");
+    if (!looksLikeApiKey(apiKey)) throw invalidApiKey();
+    const tenant = await this.store.findByKeyHash(hashApiKey(apiKey));
+    if (tenant === null) throw invalidApiKey();
+    return tenant;
   }
 }
