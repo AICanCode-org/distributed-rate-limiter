@@ -22,7 +22,8 @@ class ApiLimitsTest {
         Res r = app.check(k, Map.of("resource", "orders.create", "cost", 2));
         assertThat(r.status()).isEqualTo(200);
         assertThat(r.body()).isEqualTo("{\"allowed\":true,\"tenantId\":\"acme\",\"resource\":\"orders.create\",\"cost\":2,"
-                + "\"algorithm\":\"TOKEN_BUCKET\",\"limit\":5,\"remaining\":3,\"resetAfterMs\":24000,\"retryAfterMs\":0}");
+                + "\"algorithm\":\"TOKEN_BUCKET\",\"limit\":5,\"remaining\":3,\"resetAfterMs\":24000,\"retryAfterMs\":0,"
+                + "\"degraded\":false}");
         assertThat(r.header("X-RateLimit-Limit")).isEqualTo("5");
         assertThat(r.header("X-RateLimit-Remaining")).isEqualTo("3");
         assertThat(r.header("X-RateLimit-Reset")).isEqualTo("24");

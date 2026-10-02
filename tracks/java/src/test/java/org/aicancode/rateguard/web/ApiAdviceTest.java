@@ -30,12 +30,12 @@ class ApiAdviceTest {
         assertThat(List.of(body.get("tenantId").asString(), body.get("provider").asString(), body.get("fallback").asBoolean()))
                 .isEqualTo(List.of("acme", "rules", false));
         assertThat(body.get("currentPolicy").toString())
-                .isEqualTo("{\"algorithm\":\"TOKEN_BUCKET\",\"limit\":2,\"windowSeconds\":3600}");
+                .isEqualTo("{\"algorithm\":\"TOKEN_BUCKET\",\"limit\":2,\"windowSeconds\":3600,\"failMode\":\"CLOSED\"}");
         assertThat(List.of(body.at("/stats/allowed").asInt(), body.at("/stats/denied").asInt(),
                 body.at("/stats/minutes").asInt())).isEqualTo(List.of(2, 3, 10));
         assertThat(body.get("action").asString()).isEqualTo("RAISE_LIMIT");
         assertThat(body.get("suggestedPolicy").toString())
-                .isEqualTo("{\"algorithm\":\"TOKEN_BUCKET\",\"limit\":20,\"windowSeconds\":3600}");
+                .isEqualTo("{\"algorithm\":\"TOKEN_BUCKET\",\"limit\":20,\"windowSeconds\":3600,\"failMode\":\"CLOSED\"}");
         assertThat(body.get("summary").asString()).startsWith("60% of requests were denied (3 of 5).");
         assertThat(body.get("generatedAt").asString()).isEqualTo("2026-10-02T09:30:00.000Z");
         // nothing was applied

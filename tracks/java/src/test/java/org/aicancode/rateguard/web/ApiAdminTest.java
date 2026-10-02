@@ -24,7 +24,8 @@ class ApiAdminTest {
         assertThat(r.status()).isEqualTo(201);
         assertThat(r.header("Location")).isEqualTo("/api/v1/admin/tenants/acme");
         assertThat(r.body()).isEqualTo("{\"id\":\"acme\",\"name\":\"Acme Corp\",\"policy\":{\"algorithm\":\"TOKEN_BUCKET\","
-                + "\"limit\":5,\"windowSeconds\":60},\"keyPrefix\":\"rg_000000\",\"createdAt\":\"2026-10-02T09:30:00.000Z\","
+                + "\"limit\":5,\"windowSeconds\":60,\"failMode\":\"CLOSED\"},\"keyPrefix\":\"rg_000000\","
+                + "\"createdAt\":\"2026-10-02T09:30:00.000Z\","
                 + "\"updatedAt\":\"2026-10-02T09:30:00.000Z\",\"apiKey\":\"" + KEY1 + "\"}");
         Res got = app.admin("GET", "/api/v1/admin/tenants/acme");
         assertThat(got.status()).isEqualTo(200);
@@ -92,7 +93,7 @@ class ApiAdminTest {
         Res r = app.admin("PUT", "/api/v1/admin/tenants/acme/policy", policy("SLIDING_WINDOW", 100, 3600));
         assertThat(r.status()).isEqualTo(200);
         assertThat(r.json().get("policy").toString())
-                .isEqualTo("{\"algorithm\":\"SLIDING_WINDOW\",\"limit\":100,\"windowSeconds\":3600}");
+                .isEqualTo("{\"algorithm\":\"SLIDING_WINDOW\",\"limit\":100,\"windowSeconds\":3600,\"failMode\":\"CLOSED\"}");
         assertThat(r.json().get("updatedAt").asString()).isEqualTo("2026-10-02T09:31:00.000Z");
         assertThat(app.admin("PUT", "/api/v1/admin/tenants/acme/policy", Map.of("algorithm", "TOKEN_BUCKET")).status())
                 .isEqualTo(400);

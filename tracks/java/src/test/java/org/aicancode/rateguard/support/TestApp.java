@@ -6,9 +6,12 @@ import static org.springframework.test.web.servlet.request.MockMvcRequestBuilder
 import java.nio.charset.StandardCharsets;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Supplier;
 import org.aicancode.rateguard.ai.AdvisorService;
 import org.aicancode.rateguard.ai.RuleAdvisor;
+import org.aicancode.rateguard.config.AppConfig;
+import org.aicancode.rateguard.metrics.Metrics;
 import org.aicancode.rateguard.security.AdminAuth;
 import org.aicancode.rateguard.service.LimiterService;
 import org.aicancode.rateguard.service.TenantService;
@@ -17,7 +20,9 @@ import org.aicancode.rateguard.store.Store;
 import org.aicancode.rateguard.web.AdminController;
 import org.aicancode.rateguard.web.HealthController;
 import org.aicancode.rateguard.web.LimitsController;
+import org.aicancode.rateguard.web.MetricsController;
 import org.aicancode.rateguard.web.ProblemHandler;
+import org.aicancode.rateguard.web.RequestIdFilter;
 import org.springframework.http.HttpMethod;
 import org.springframework.http.MediaType;
 import org.springframework.mock.web.MockHttpServletResponse;
@@ -41,18 +46,25 @@ public class TestApp {
     public final MutableClock clock = new MutableClock();
     /** The in-memory store (null when the app runs on another store, e.g. Redis in the integration tests). */
     public final InMemoryStore memory;
+    /** The store the app talks to (v1.1: the given store behind the Redis circuit breaker). */
     public final Store store;
+    public final Metrics metrics = new Metrics();
+    /** The breaker's clock in ms (tests move it to skip the cooldown). */
+    public final AtomicLong breakerNow = new AtomicLong(1_000_000);
     public final MockMvc mvc;
 
     /** The app on {@code store} (null: its own in-memory store on the test clock). */
     public TestApp(Store store, AdvisorService advisor) {
         this.memory = store == null ? new InMemoryStore(clock) : null;
-        this.store = store == null ? memory : store;
-        TenantService tenants = new TenantService(this.store, clock, keyGen());
+        this.store = AppConfig.guard(store == null ? memory : store, 5000, metrics, breakerNow::get);
+        TenantService tenants = new TenantService(this.store, clock, keyGen(),
+                () -> metrics.inc(Metrics.TENANTS_CREATED));
         mvc = MockMvcBuilders.standaloneSetup(new HealthController(this.store),
                         new AdminController(new AdminAuth(ADMIN_TOKEN), tenants, advisor, clock),
-                        new LimitsController(tenants, new LimiterService(this.store)))
+                        new LimitsController(tenants, new LimiterService(this.store, new InMemoryStore(clock), metrics)),
+                        new MetricsController(metrics))
                 .setControllerAdvice(new ProblemHandler())
+                .addFilters(new RequestIdFilter())
                 .build();
     }
 
@@ -93,7 +105,8 @@ public class TestApp {
             headers.forEach(b::header);
             MockHttpServletResponse r = mvc.perform(b).andReturn().getResponse();
             String text = r.getContentAsString(StandardCharsets.UTF_8);
-            return new Res(r.getStatus(), r, text, text.isEmpty() ? null : JSON.readTree(text));
+            boolean json = r.getContentType() != null && r.getContentType().contains("json");
+            return new Res(r.getStatus(), r, text, json && !text.isEmpty() ? JSON.readTree(text) : null);
         } catch (Exception e) {
             throw new IllegalStateException(e);
         }
@@ -121,8 +134,16 @@ public class TestApp {
 
     /** Creates a tenant and returns the 201 body (with its apiKey). */
     public JsonNode tenant(String id, String algorithm, int limit, int windowSeconds) {
-        Res r = admin("POST", "/api/v1/admin/tenants",
-                Map.of("id", id, "name", "Acme Corp", "policy", policy(algorithm, limit, windowSeconds)));
+        return tenant(id, algorithm, limit, windowSeconds, null);
+    }
+
+    /** v1.1: with a failMode (null: leave it out, like a v1.0 client). */
+    public JsonNode tenant(String id, String algorithm, int limit, int windowSeconds, String failMode) {
+        Map<String, Object> policy = policy(algorithm, limit, windowSeconds);
+        if (failMode != null) {
+            policy.put("failMode", failMode);
+        }
+        Res r = admin("POST", "/api/v1/admin/tenants", Map.of("id", id, "name", "Acme Corp", "policy", policy));
         assertThat(r.status()).as(String.valueOf(r.json())).isEqualTo(201);
         return r.json();
     }

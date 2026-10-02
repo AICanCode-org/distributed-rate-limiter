@@ -3,12 +3,16 @@ package org.aicancode.rateguard.service;
 import java.time.Clock;
 import java.time.Instant;
 import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Supplier;
 import org.aicancode.rateguard.domain.ApiException;
 import org.aicancode.rateguard.domain.DuplicateException;
 import org.aicancode.rateguard.domain.Models.Policy;
 import org.aicancode.rateguard.domain.Models.Tenant;
 import org.aicancode.rateguard.domain.Models.UsagePoint;
+import org.aicancode.rateguard.domain.StoreUnavailableException;
 import org.aicancode.rateguard.domain.Times;
 import org.aicancode.rateguard.domain.Validation;
 import org.aicancode.rateguard.security.ApiKeys;
@@ -28,11 +32,22 @@ public class TenantService {
     private final Store store;
     private final Clock clock;
     private final Supplier<String> newKey;
+    private final Runnable onCreated;
+    /**
+     * v1.1: the last tenant Redis returned for each key hash, used ONLY while Redis is unavailable, so a failMode can
+     * still be applied to a known tenant (ADR-0006).
+     */
+    private final Map<String, Tenant> lastKnown = new ConcurrentHashMap<>();
 
-    public TenantService(Store store, Clock clock, Supplier<String> newKey) {
+    public TenantService(Store store, Clock clock, Supplier<String> newKey, Runnable onCreated) {
         this.store = store;
         this.clock = clock;
         this.newKey = newKey;
+        this.onCreated = onCreated;
+    }
+
+    public TenantService(Store store, Clock clock, Supplier<String> newKey) {
+        this(store, clock, newKey, () -> { });
     }
 
     public Store store() {
@@ -52,6 +67,7 @@ public class TenantService {
         } catch (DuplicateException e) {
             throw ApiException.tenantExists();
         }
+        onCreated.run();
         return new Created(tenant, apiKey);
     }
 
@@ -104,6 +120,22 @@ public class TenantService {
         if (!ApiKeys.looksLikeApiKey(apiKey)) {
             throw ApiException.invalidApiKey();
         }
-        return store.findByKeyHash(ApiKeys.hash(apiKey)).orElseThrow(ApiException::invalidApiKey);
+        String keyHash = ApiKeys.hash(apiKey);
+        Optional<Tenant> found;
+        try {
+            found = store.findByKeyHash(keyHash);
+        } catch (StoreUnavailableException e) {
+            Tenant cached = lastKnown.get(keyHash);
+            if (cached == null) {
+                throw e; // an unknown key during an outage: nothing to decide with -> 503
+            }
+            return cached;
+        }
+        if (found.isEmpty()) {
+            lastKnown.remove(keyHash);
+            throw ApiException.invalidApiKey();
+        }
+        lastKnown.put(keyHash, found.get());
+        return found.get();
     }
 }

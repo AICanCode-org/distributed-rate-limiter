@@ -6,7 +6,7 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.RestController;
 
-/** Liveness + Redis health. 503 when Redis is down. */
+/** Liveness + Redis health. v1.1: always 200 while the process runs; DEGRADED when Redis is down. */
 @RestController
 public class HealthController {
 
@@ -19,6 +19,6 @@ public class HealthController {
     @GetMapping("/health")
     public ResponseEntity<Map<String, Object>> health() {
         boolean up = store.ping();
-        return ResponseEntity.status(up ? 200 : 503).body(Json.health(up));
+        return ResponseEntity.ok(Json.health(up));
     }
 }

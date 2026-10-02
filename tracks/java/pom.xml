@@ -13,7 +13,7 @@
 
     <groupId>org.aicancode</groupId>
     <artifactId>rateguard-java</artifactId>
-    <version>1.0.0</version>
+    <version>1.1.0</version>
     <name>RateGuard (Java track)</name>
     <description>RateGuard distributed rate limiter - Java 21 / Spring Boot track (AiCanCode)</description>
 

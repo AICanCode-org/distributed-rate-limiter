@@ -14,8 +14,8 @@ class HealthTest {
         assertThat(app.get("/health").json().toString()).isEqualTo("{\"status\":\"UP\",\"checks\":{\"redis\":\"UP\"}}");
         app.memory.up = false;
         TestApp.Res r = app.get("/health");
-        assertThat(r.status()).isEqualTo(503);
-        assertThat(r.json().toString()).isEqualTo("{\"status\":\"DOWN\",\"checks\":{\"redis\":\"DOWN\"}}");
+        assertThat(r.status()).isEqualTo(200);
+        assertThat(r.json().toString()).isEqualTo("{\"status\":\"DEGRADED\",\"checks\":{\"redis\":\"DOWN\"}}");
     }
 
     @Test

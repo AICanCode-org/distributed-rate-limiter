@@ -14,7 +14,9 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import org.aicancode.rateguard.domain.DuplicateException;
 import org.aicancode.rateguard.domain.Models.Algorithm;
+import org.aicancode.rateguard.config.AppConfig;
 import org.aicancode.rateguard.domain.Models.Decision;
+import org.aicancode.rateguard.domain.Models.FailMode;
 import org.aicancode.rateguard.domain.Models.Policy;
 import org.aicancode.rateguard.domain.Models.Tenant;
 import org.aicancode.rateguard.domain.Models.UsagePoint;
@@ -22,6 +24,8 @@ import org.aicancode.rateguard.domain.StoreUnavailableException;
 import org.aicancode.rateguard.limiter.Algorithms;
 import org.aicancode.rateguard.limiter.Algorithms.BucketState;
 import org.aicancode.rateguard.limiter.Algorithms.WindowState;
+import org.aicancode.rateguard.metrics.Metrics;
+import org.aicancode.rateguard.store.GuardedStore;
 import org.aicancode.rateguard.store.RedisStore;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -245,5 +249,30 @@ class RedisStoreIntegrationTest {
         assertThatThrownBy(() -> dead.check("acme", "x", new Policy(Algorithm.TOKEN_BUCKET, 1, 1), 1))
                 .isInstanceOf(StoreUnavailableException.class);
         assertThatThrownBy(() -> dead.getTenant("acme")).isInstanceOf(StoreUnavailableException.class);
+    }
+
+    // ---- v1.1 (Phase 7) ----------------------------------------------------------------------------
+    @Test
+    void failModeIsStoredAndV10HashesReadAsClosed() {
+        store.createTenant(new Tenant("acme", "Acme Corp", new Policy(Algorithm.TOKEN_BUCKET, 5, 60, FailMode.LOCAL),
+                "h1", "rg_000000", NOW, NOW));
+        assertThat(store.getTenant("acme").orElseThrow().policy().failMode()).isEqualTo(FailMode.LOCAL);
+        store.commands().hdel("rg:tenant:acme", "failMode"); // what a tenant written by v1.0 looks like
+        assertThat(store.getTenant("acme").orElseThrow().policy().failMode()).isEqualTo(FailMode.CLOSED);
+    }
+
+    @Test
+    void aDeadRedisCostsThreeFailuresThenAnswersFast() {
+        Metrics metrics = new Metrics();
+        RedisStore dead = RedisStore.fromUrl("redis://127.0.0.1:1/0", 300, LUA);
+        opened.add(dead);
+        GuardedStore guarded = AppConfig.guard(dead, 5000, metrics, System::currentTimeMillis);
+        long started = System.nanoTime();
+        for (int i = 0; i < 20; i++) {
+            assertThat(guarded.ping()).isFalse();
+        }
+        assertThat((System.nanoTime() - started) / 1_000_000).isLessThan(5000);
+        assertThat(metrics.value(Metrics.STORE_ERRORS)).isEqualTo(3);
+        assertThat(metrics.value(Metrics.STORE_SHORT_CIRCUITS)).isEqualTo(17);
     }
 }

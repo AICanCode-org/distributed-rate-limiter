@@ -10,6 +10,7 @@ public class AppProperties {
 
     private final String redisUrl;
     private final int redisTimeoutMs;
+    private final int redisBreakerCooldownMs;
     private final String luaDir;
     private final String adminToken;
     private final String aiProvider;
@@ -21,6 +22,7 @@ public class AppProperties {
     public AppProperties(
             @Value("${REDIS_URL:redis://localhost:6379/0}") String redisUrl,
             @Value("${REDIS_TIMEOUT_MS:1000}") int redisTimeoutMs,
+            @Value("${REDIS_BREAKER_COOLDOWN_MS:5000}") int redisBreakerCooldownMs,
             @Value("${LUA_DIR:../../spec/lua}") String luaDir,
             @Value("${ADMIN_TOKEN:}") String adminToken,
             @Value("${AI_PROVIDER:offline}") String aiProvider,
@@ -30,6 +32,7 @@ public class AppProperties {
             @Value("${LLM_TIMEOUT_MS:5000}") int llmTimeoutMs) {
         this.redisUrl = redisUrl;
         this.redisTimeoutMs = redisTimeoutMs;
+        this.redisBreakerCooldownMs = redisBreakerCooldownMs;
         this.luaDir = luaDir;
         this.adminToken = adminToken;
         this.aiProvider = aiProvider.toLowerCase(Locale.ROOT);
@@ -45,6 +48,11 @@ public class AppProperties {
 
     public int redisTimeoutMs() {
         return redisTimeoutMs;
+    }
+
+    /** v1.1: how long the Redis circuit stays open before one trial call. */
+    public int redisBreakerCooldownMs() {
+        return redisBreakerCooldownMs;
     }
 
     /** Where token_bucket.lua and sliding_window.lua live (spec/lua; /app/lua in the Docker image). */

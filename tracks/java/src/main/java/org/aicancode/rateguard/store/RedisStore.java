@@ -31,6 +31,7 @@ import java.util.function.Function;
 import org.aicancode.rateguard.domain.DuplicateException;
 import org.aicancode.rateguard.domain.Models.Algorithm;
 import org.aicancode.rateguard.domain.Models.Decision;
+import org.aicancode.rateguard.domain.Models.FailMode;
 import org.aicancode.rateguard.domain.Models.Policy;
 import org.aicancode.rateguard.domain.Models.Tenant;
 import org.aicancode.rateguard.domain.Models.UsagePoint;
@@ -145,6 +146,7 @@ public class RedisStore implements Store, AutoCloseable {
         h.put("algorithm", t.policy().algorithm().name());
         h.put("limit", Integer.toString(t.policy().limit()));
         h.put("windowSeconds", Integer.toString(t.policy().windowSeconds()));
+        h.put("failMode", t.policy().failMode().name());
         h.put("keyHash", t.keyHash());
         h.put("keyPrefix", t.keyPrefix());
         h.put("createdAt", Long.toString(t.createdAt().toEpochMilli()));
@@ -154,7 +156,9 @@ public class RedisStore implements Store, AutoCloseable {
 
     static Tenant fromHash(Map<String, String> h) {
         Policy policy = new Policy(Algorithm.valueOf(h.get("algorithm")), Integer.parseInt(h.get("limit")),
-                Integer.parseInt(h.get("windowSeconds")));
+                Integer.parseInt(h.get("windowSeconds")),
+                // A tenant written by v1.0 has no failMode: it keeps the v1.0 behaviour (CLOSED).
+                FailMode.valueOf(h.getOrDefault("failMode", FailMode.CLOSED.name())));
         return new Tenant(h.get("id"), h.get("name"), policy, h.get("keyHash"), h.get("keyPrefix"),
                 Instant.ofEpochMilli(Long.parseLong(h.get("createdAt"))),
                 Instant.ofEpochMilli(Long.parseLong(h.get("updatedAt"))));

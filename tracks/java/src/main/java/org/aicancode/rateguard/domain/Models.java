@@ -10,13 +10,21 @@ public final class Models {
 
     public enum Algorithm { TOKEN_BUCKET, SLIDING_WINDOW }
 
-    public record Policy(Algorithm algorithm, int limit, int windowSeconds) {
+    /** v1.1 (ADR-0006): what to do while Redis is unavailable. */
+    public enum FailMode { CLOSED, OPEN, LOCAL }
+
+    public record Policy(Algorithm algorithm, int limit, int windowSeconds, FailMode failMode) {
+        /** A v1.0-style policy: CLOSED, the v1.0 behaviour. */
+        public Policy(Algorithm algorithm, int limit, int windowSeconds) {
+            this(algorithm, limit, windowSeconds, FailMode.CLOSED);
+        }
+
         public long windowMs() {
             return windowSeconds * 1000L;
         }
 
         public Policy withLimit(int newLimit) {
-            return new Policy(algorithm, newLimit, windowSeconds);
+            return new Policy(algorithm, newLimit, windowSeconds, failMode);
         }
     }
 
@@ -25,7 +33,15 @@ public final class Models {
     }
 
     /** The answer of one limiter call (identical fields to the Lua scripts' return value). */
-    public record Decision(boolean allowed, long remaining, long retryAfterMs, long resetAfterMs) {
+    public record Decision(boolean allowed, long remaining, long retryAfterMs, long resetAfterMs, boolean degraded) {
+        public Decision(boolean allowed, long remaining, long retryAfterMs, long resetAfterMs) {
+            this(allowed, remaining, retryAfterMs, resetAfterMs, false);
+        }
+
+        /** v1.1: the same answer, marked as decided by the failMode because Redis was unavailable. */
+        public Decision asDegraded() {
+            return new Decision(allowed, remaining, retryAfterMs, resetAfterMs, true);
+        }
     }
 
     /** A decision plus what it was about (what the HTTP layer renders). */

@@ -2,6 +2,7 @@ package org.aicancode.rateguard.domain;
 
 import java.util.regex.Pattern;
 import org.aicancode.rateguard.domain.Models.Algorithm;
+import org.aicancode.rateguard.domain.Models.FailMode;
 import org.aicancode.rateguard.domain.Models.Policy;
 import tools.jackson.databind.JsonNode;
 
@@ -90,7 +91,20 @@ public final class Validation {
         if (window == null || window < 1 || window > MAX_WINDOW_SECONDS) {
             throw ApiException.validation("policy.windowSeconds must be an integer between 1 and 86400");
         }
-        return new Policy(parsed, limit.intValue(), window.intValue());
+        // v1.1: optional, so v1.0 clients keep working (they get CLOSED, the v1.0 behaviour)
+        JsonNode failMode = node.get("failMode");
+        FailMode mode = failMode == null ? FailMode.CLOSED : null;
+        if (failMode != null && failMode.isString()) {
+            for (FailMode m : FailMode.values()) {
+                if (m.name().equals(failMode.asString())) {
+                    mode = m;
+                }
+            }
+        }
+        if (mode == null) {
+            throw ApiException.validation("policy.failMode must be CLOSED, OPEN or LOCAL");
+        }
+        return new Policy(parsed, limit.intValue(), window.intValue(), mode);
     }
 
     public static String resource(JsonNode node) {

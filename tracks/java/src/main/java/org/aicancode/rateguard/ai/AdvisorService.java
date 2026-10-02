@@ -18,10 +18,16 @@ public class AdvisorService {
 
     private final RuleAdvisor rules;
     private final LlmAdvisor llm;
+    private final Runnable onFallback;
 
-    public AdvisorService(RuleAdvisor rules, LlmAdvisor llm) {
+    public AdvisorService(RuleAdvisor rules, LlmAdvisor llm, Runnable onFallback) {
         this.rules = rules;
         this.llm = llm;
+        this.onFallback = onFallback;
+    }
+
+    public AdvisorService(RuleAdvisor rules, LlmAdvisor llm) {
+        this(rules, llm, () -> { });
     }
 
     public Advice.Result advise(Tenant tenant, UsageStats stats) {
@@ -30,6 +36,7 @@ public class AdvisorService {
                 return new Advice.Result("llm", false, llm.advise(tenant, stats));
             } catch (Exception e) {
                 LOG.warn("LLM advice failed, using the rules: {}", e.getClass().getSimpleName());
+                onFallback.run();
                 return new Advice.Result("rules", true, rules.advise(tenant.policy(), stats));
             }
         }

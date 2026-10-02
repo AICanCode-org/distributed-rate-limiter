@@ -21,7 +21,9 @@ final class Json {
     }
 
     static Map<String, Object> policy(Policy p) {
-        return LlmAdvisor.policyJson(p);
+        Map<String, Object> m = LlmAdvisor.policyJson(p);
+        m.put("failMode", p.failMode().name());
+        return m;
     }
 
     static Map<String, Object> tenant(Tenant t) {
@@ -56,6 +58,7 @@ final class Json {
         m.put("remaining", v.decision().remaining());
         m.put("resetAfterMs", v.decision().resetAfterMs());
         m.put("retryAfterMs", v.decision().retryAfterMs());
+        m.put("degraded", v.decision().degraded());
         return m;
     }
 
@@ -99,10 +102,10 @@ final class Json {
     }
 
     static Map<String, Object> health(boolean redisUp) {
-        String redis = redisUp ? "UP" : "DOWN";
         Map<String, Object> m = new LinkedHashMap<>();
-        m.put("status", redis);
-        m.put("checks", Map.of("redis", redis));
+        // v1.1: without Redis the app still answers (from each tenant's failMode): DEGRADED, not down.
+        m.put("status", redisUp ? "UP" : "DEGRADED");
+        m.put("checks", Map.of("redis", redisUp ? "UP" : "DOWN"));
         return m;
     }
 }
