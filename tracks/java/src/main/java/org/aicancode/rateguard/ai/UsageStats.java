@@ -1,9 +1,12 @@
 package org.aicancode.rateguard.ai;
 
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import org.aicancode.rateguard.domain.Models.Policy;
 import org.aicancode.rateguard.domain.Models.UsagePoint;
+import org.aicancode.rateguard.domain.Times;
 
 /**
  * M5: the facts the advisor works from, always computed by code (never by the LLM). Integers only, identical in
@@ -25,17 +28,49 @@ public record UsageStats(int minutes, long allowed, long denied, long deniedPerc
     }
 
     public static UsageStats summarize(Policy policy, List<UsagePoint> points) {
-        // TODO(phase-3 M5): the numbers the advice is based on, computed by CODE (never by the LLM): totals,
-        //   deniedPercent (integer, rounded down), peak minute (first one wins) and its denials, median and p90
-        //   of the ACTIVE minutes, capacity per minute = limit * 60 // windowSeconds. See the advisor tests for
-        //   the exact definitions.
-        throw new UnsupportedOperationException("TODO(phase-3 M5): UsageStats.summarize");
+        long allowed = 0;
+        long denied = 0;
+        long peak = 0;
+        int peakIndex = -1;
+        List<Long> active = new ArrayList<>();
+        for (int i = 0; i < points.size(); i++) {
+            UsagePoint p = points.get(i);
+            long demand = p.allowed() + p.denied();
+            allowed += p.allowed();
+            denied += p.denied();
+            if (demand > peak) {
+                peak = demand;
+                peakIndex = i;
+            }
+            if (demand > 0) {
+                active.add(demand);
+            }
+        }
+        active.sort(null);
+        int n = active.size();
+        long total = allowed + denied;
+        return new UsageStats(points.size(), allowed, denied, total == 0 ? 0 : denied * 100 / total, peak,
+                peakIndex >= 0 ? points.get(peakIndex).minute() : null,
+                peakIndex >= 0 ? points.get(peakIndex).denied() : 0,
+                n == 0 ? 0 : active.get((n - 1) / 2),
+                n == 0 ? 0 : active.get((9 * n + 9) / 10 - 1),
+                n, (long) policy.limit() * 60 / policy.windowSeconds());
     }
 
     /** The API shape (also what the LLM sees). */
     public Map<String, Object> toJson() {
-        // TODO(phase-3 M5): the stats as the JSON object of the API (camelCase names, peakMinute as an ISO
-        //   time or null).
-        throw new UnsupportedOperationException("TODO(phase-3 M5): UsageStats.toJson");
+        Map<String, Object> m = new LinkedHashMap<>();
+        m.put("minutes", minutes);
+        m.put("allowed", allowed);
+        m.put("denied", denied);
+        m.put("deniedPercent", deniedPercent);
+        m.put("peakPerMinute", peak);
+        m.put("peakMinute", peakMinute == null ? null : Times.isoMs(peakMinute * 60_000));
+        m.put("peakMinuteDenied", peakDenied);
+        m.put("medianPerMinute", median);
+        m.put("p90PerMinute", p90);
+        m.put("activeMinutes", activeMinutes);
+        m.put("capacityPerMinute", capacityPerMinute);
+        return m;
     }
 }

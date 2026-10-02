@@ -1,7 +1,11 @@
 package org.aicancode.rateguard.security;
 
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.security.SecureRandom;
 import java.util.Base64;
+import java.util.HexFormat;
 import java.util.regex.Pattern;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -19,36 +23,33 @@ public final class ApiKeys {
 
     /** 'rg_' + 32 lowercase hex characters (128 random bits from a CSPRNG). */
     public static String newApiKey() {
-        // TODO(phase-3 M1): 'rg_' + 32 lowercase hex characters from a CSPRNG (128 random bits). Never
-        //   Math.random / random.random.
-        throw new UnsupportedOperationException("TODO(phase-3 M1): ApiKeys.newApiKey");
+        byte[] bytes = new byte[16];
+        RANDOM.nextBytes(bytes);
+        return PREFIX + HexFormat.of().formatHex(bytes);
     }
 
     /** Hex SHA-256. A fast hash is fine here: the key is 128 random bits, not a guessable password. */
     public static String hash(String apiKey) {
-        // TODO(phase-3 M1): hex SHA-256 of the key (UTF-8). Only this hash is stored; a fast hash is fine for
-        //   128 random bits.
-        throw new UnsupportedOperationException("TODO(phase-3 M1): ApiKeys.hash");
+        try {
+            MessageDigest sha = MessageDigest.getInstance("SHA-256");
+            return HexFormat.of().formatHex(sha.digest(apiKey.getBytes(StandardCharsets.UTF_8)));
+        } catch (NoSuchAlgorithmException e) {
+            throw new IllegalStateException(e);
+        }
     }
 
     /** The first 9 characters ('rg_' + 6 hex): enough to recognise a key in a list, useless to an attacker. */
     public static String prefix(String apiKey) {
-        // TODO(phase-3 M1): the first 9 characters ('rg_' + 6 hex): shown in lists so humans can tell keys
-        //   apart.
-        throw new UnsupportedOperationException("TODO(phase-3 M1): ApiKeys.prefix");
+        return apiKey.substring(0, 9);
     }
 
     public static boolean looksLikeApiKey(String value) {
-        // TODO(phase-3 M1): true only for 'rg_' + exactly 32 lowercase hex characters (malformed keys never
-        //   reach Redis).
-        throw new UnsupportedOperationException("TODO(phase-3 M1): ApiKeys.looksLikeApiKey");
+        return value != null && API_KEY.matcher(value).matches();
     }
 
     /** Compare secrets without leaking, through timing, how many leading characters match. */
     public static boolean constantTimeEquals(String a, String b) {
-        // TODO(phase-3 M1): compare two secrets in constant time (hmac.compare_digest /
-        //   crypto.timingSafeEqual on equal-length buffers / MessageDigest.isEqual), never ==.
-        throw new UnsupportedOperationException("TODO(phase-3 M1): ApiKeys.constantTimeEquals");
+        return MessageDigest.isEqual(a.getBytes(StandardCharsets.UTF_8), b.getBytes(StandardCharsets.UTF_8));
     }
 
     /** Empty means "not set": a random per-process value is used (dev only), with a warning. */

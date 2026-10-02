@@ -1,10 +1,13 @@
 package org.aicancode.rateguard.store;
 
 import io.lettuce.core.ClientOptions;
+import io.lettuce.core.KeyScanCursor;
 import io.lettuce.core.RedisClient;
 import io.lettuce.core.RedisException;
 import io.lettuce.core.RedisNoScriptException;
 import io.lettuce.core.RedisURI;
+import io.lettuce.core.ScanArgs;
+import io.lettuce.core.ScanCursor;
 import io.lettuce.core.ScriptOutputType;
 import io.lettuce.core.SocketOptions;
 import io.lettuce.core.TimeoutOptions;
@@ -15,13 +18,18 @@ import java.io.UncheckedIOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
+import java.time.Instant;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.function.Consumer;
 import java.util.function.Function;
 import org.aicancode.rateguard.domain.DuplicateException;
+import org.aicancode.rateguard.domain.Models.Algorithm;
 import org.aicancode.rateguard.domain.Models.Decision;
 import org.aicancode.rateguard.domain.Models.Policy;
 import org.aicancode.rateguard.domain.Models.Tenant;
@@ -49,10 +57,8 @@ public class RedisStore implements Store, AutoCloseable {
 
     public RedisStore(RedisClient client, Path luaDir) {
         this.client = client;
-        // TODO(phase-3 M3): read(luaDir.resolve("token_bucket.lua")) and sliding_window.lua (you wrote them in
-        //   Phase 2). Until then the app starts without them.
-        this.tokenBucketLua = null;
-        this.slidingWindowLua = null;
+        this.tokenBucketLua = read(luaDir.resolve("token_bucket.lua"));
+        this.slidingWindowLua = read(luaDir.resolve("sliding_window.lua"));
     }
 
     public static RedisStore fromUrl(String url, int timeoutMs, Path luaDir) {
@@ -133,76 +139,112 @@ public class RedisStore implements Store, AutoCloseable {
     }
 
     static Map<String, String> toHash(Tenant t) {
-        // TODO(phase-3 M3): the tenant as a flat string map for HSET: id, name, algorithm, limit,
-        //   windowSeconds, keyHash, keyPrefix, createdAt/updatedAt as epoch ms.
-        throw new UnsupportedOperationException("TODO(phase-3 M3): RedisStore.toHash");
+        Map<String, String> h = new LinkedHashMap<>();
+        h.put("id", t.id());
+        h.put("name", t.name());
+        h.put("algorithm", t.policy().algorithm().name());
+        h.put("limit", Integer.toString(t.policy().limit()));
+        h.put("windowSeconds", Integer.toString(t.policy().windowSeconds()));
+        h.put("keyHash", t.keyHash());
+        h.put("keyPrefix", t.keyPrefix());
+        h.put("createdAt", Long.toString(t.createdAt().toEpochMilli()));
+        h.put("updatedAt", Long.toString(t.updatedAt().toEpochMilli()));
+        return h;
     }
 
     static Tenant fromHash(Map<String, String> h) {
-        // TODO(phase-3 M3): the reverse of toHash (numbers parsed, epoch ms back to Instants).
-        throw new UnsupportedOperationException("TODO(phase-3 M3): RedisStore.fromHash");
+        Policy policy = new Policy(Algorithm.valueOf(h.get("algorithm")), Integer.parseInt(h.get("limit")),
+                Integer.parseInt(h.get("windowSeconds")));
+        return new Tenant(h.get("id"), h.get("name"), policy, h.get("keyHash"), h.get("keyPrefix"),
+                Instant.ofEpochMilli(Long.parseLong(h.get("createdAt"))),
+                Instant.ofEpochMilli(Long.parseLong(h.get("updatedAt"))));
     }
 
     @Override
     public void createTenant(Tenant tenant) {
-        // TODO(phase-3 M3): SADD rg:tenants <id>; 0 means the id exists -> DuplicateError (Redis decides the
-        //   race, not the app). Then in ONE MULTI/EXEC: HSET the tenant hash and SET rg:key:<hash> <id>.
-        throw new UnsupportedOperationException("TODO(phase-3 M3): RedisStore.createTenant");
+        // SADD answers 0 when the id is already a member: Redis, not the app, decides the race.
+        if (call(r -> r.sadd(Keys.TENANTS, tenant.id())) == 0) {
+            throw new DuplicateException(tenant.id());
+        }
+        transaction(r -> {
+            r.hset(Keys.tenant(tenant.id()), toHash(tenant));
+            r.set(Keys.apiKey(tenant.keyHash()), tenant.id());
+        });
     }
 
     @Override
     public Optional<Tenant> getTenant(String tenantId) {
-        // TODO(phase-3 M3): HGETALL rg:tenant:<id>; empty -> null.
-        throw new UnsupportedOperationException("TODO(phase-3 M3): RedisStore.getTenant");
+        Map<String, String> h = call(r -> r.hgetall(Keys.tenant(tenantId)));
+        return h.isEmpty() ? Optional.empty() : Optional.of(fromHash(h));
     }
 
     @Override
     public List<Tenant> listTenants() {
-        // TODO(phase-3 M3): SMEMBERS rg:tenants, sorted by id, then HGETALL each one in a pipeline.
-        throw new UnsupportedOperationException("TODO(phase-3 M3): RedisStore.listTenants");
+        return call(r -> r.smembers(Keys.TENANTS).stream().sorted()
+                .map(id -> r.hgetall(Keys.tenant(id)))
+                .filter(h -> !h.isEmpty())
+                .map(RedisStore::fromHash)
+                .toList());
     }
 
     @Override
     public Optional<Tenant> findByKeyHash(String keyHash) {
-        // TODO(phase-3 M3): GET rg:key:<hash> -> tenant id -> get_tenant; unknown -> null.
-        throw new UnsupportedOperationException("TODO(phase-3 M3): RedisStore.findByKeyHash");
+        String id = call(r -> r.get(Keys.apiKey(keyHash)));
+        return id == null ? Optional.empty() : getTenant(id);
     }
 
     @Override
     public void saveTenant(Tenant tenant, String oldKeyHash) {
-        // TODO(phase-3 M3): ONE MULTI/EXEC: HSET the hash; if the key hash changed, DEL the old rg:key:<old>
-        //   and SET the new one (the old key stops working at once).
-        throw new UnsupportedOperationException("TODO(phase-3 M3): RedisStore.saveTenant");
+        transaction(r -> {
+            r.hset(Keys.tenant(tenant.id()), toHash(tenant));
+            if (!oldKeyHash.equals(tenant.keyHash())) {
+                r.del(Keys.apiKey(oldKeyHash));
+                r.set(Keys.apiKey(tenant.keyHash()), tenant.id());
+            }
+        });
     }
 
     @Override
     public void deleteTenant(Tenant tenant) {
-        // TODO(phase-3 M3): ONE MULTI/EXEC: DEL the tenant hash, its rg:key and its usage ring, SREM from
-        //   rg:tenants; then reset() the limiter keys.
-        throw new UnsupportedOperationException("TODO(phase-3 M3): RedisStore.deleteTenant");
+        transaction(r -> {
+            r.del(Keys.tenant(tenant.id()), Keys.apiKey(tenant.keyHash()), Keys.usage(tenant.id()));
+            r.srem(Keys.TENANTS, tenant.id());
+        });
+        reset(tenant.id());
     }
 
     @Override
     public int reset(String tenantId) {
-        // TODO(phase-3 M3): SCAN (never KEYS) for tenant_pattern, keep the usage ring, DEL the rest; return
-        //   how many were deleted.
-        throw new UnsupportedOperationException("TODO(phase-3 M3): RedisStore.reset");
+        return call(r -> {
+            // SCAN walks the keyspace in small steps; KEYS would block Redis for everyone.
+            Set<String> doomed = new LinkedHashSet<>();
+            ScanArgs args = ScanArgs.Builder.matches(Keys.tenantPattern(tenantId)).limit(500);
+            ScanCursor cursor = ScanCursor.INITIAL;
+            do {
+                KeyScanCursor<String> page = r.scan(cursor, args);
+                page.getKeys().stream().filter(k -> !k.equals(Keys.usage(tenantId))).forEach(doomed::add);
+                cursor = page;
+            } while (!cursor.isFinished());
+            return doomed.isEmpty() ? 0 : r.del(doomed.toArray(String[]::new)).intValue();
+        });
     }
 
     @Override
     public Decision check(String tenantId, String resource, Policy policy, int cost) {
-        // TODO(phase-3 M3): ONE script call (EVALSHA, EVAL on NOSCRIPT): token_bucket.lua or
-        //   sliding_window.lua with KEYS = [limiter key, usage key] and ARGV = [limit, window_ms, cost (,
-        //   now_ms for tests)]; it returns [allowed 0/1, remaining, retryAfterMs, resetAfterMs].
-        throw new UnsupportedOperationException("TODO(phase-3 M3): RedisStore.check");
+        return check(tenantId, resource, policy, cost, null);
     }
 
     /** {@code nowMs} replaces the Redis clock (tests only, so they are deterministic). */
     public Decision check(String tenantId, String resource, Policy policy, int cost, Long nowMs) {
-        // TODO(phase-3 M3): ONE script call (EVALSHA, EVAL on NOSCRIPT): token_bucket.lua or
-        //   sliding_window.lua with KEYS = [limiter key, usage key] and ARGV = [limit, window_ms, cost (,
-        //   now_ms for tests)]; it returns [allowed 0/1, remaining, retryAfterMs, resetAfterMs].
-        throw new UnsupportedOperationException("TODO(phase-3 M3): RedisStore.check");
+        String script = policy.algorithm() == Algorithm.TOKEN_BUCKET ? tokenBucketLua : slidingWindowLua;
+        String[] keys = {Keys.limiter(tenantId, policy.algorithm(), resource), Keys.usage(tenantId)};
+        List<String> args = new ArrayList<>(List.of(Integer.toString(policy.limit()), Long.toString(policy.windowMs()),
+                Integer.toString(cost)));
+        if (nowMs != null) {
+            args.add(Long.toString(nowMs));
+        }
+        List<Long> out = call(r -> evalsha(r, script, keys, args.toArray(String[]::new)));
+        return new Decision(out.get(0) == 1, out.get(1), out.get(2), out.get(3));
     }
 
     /** EVALSHA, and EVAL (which also caches the script) when Redis answers NOSCRIPT, e.g. after a restart. */
@@ -220,9 +262,23 @@ public class RedisStore implements Store, AutoCloseable {
 
     @Override
     public List<UsagePoint> usage(String tenantId, int minutes) {
-        // TODO(phase-3 M3): TIME gives Redis' clock; HGETALL the ring; for each of the last n minutes slot =
-        //   usage_slot(minute): use a<slot>/d<slot> only if m<slot> == minute, else zeros. Oldest first.
-        throw new UnsupportedOperationException("TODO(phase-3 M3): RedisStore.usage");
+        return call(r -> {
+            List<String> time = r.time();
+            long nowMs = Long.parseLong(time.get(0)) * 1000 + Long.parseLong(time.get(1)) / 1000;
+            long current = Math.floorDiv(nowMs, 60_000L);
+            Map<String, String> ring = r.hgetall(Keys.usage(tenantId));
+            List<UsagePoint> out = new ArrayList<>();
+            for (long minute = current - minutes + 1; minute <= current; minute++) {
+                int slot = Keys.usageSlot(minute);
+                if (Long.toString(minute).equals(ring.get("m" + slot))) {
+                    out.add(new UsagePoint(minute, Long.parseLong(ring.getOrDefault("a" + slot, "0")),
+                            Long.parseLong(ring.getOrDefault("d" + slot, "0"))));
+                } else {
+                    out.add(new UsagePoint(minute, 0, 0));
+                }
+            }
+            return out;
+        });
     }
 
     /** The raw commands (integration tests inspect TTLs and flush the test database). */

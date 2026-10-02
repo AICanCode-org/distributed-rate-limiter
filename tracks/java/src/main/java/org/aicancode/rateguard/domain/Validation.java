@@ -1,6 +1,7 @@
 package org.aicancode.rateguard.domain;
 
 import java.util.regex.Pattern;
+import org.aicancode.rateguard.domain.Models.Algorithm;
 import org.aicancode.rateguard.domain.Models.Policy;
 import tools.jackson.databind.JsonNode;
 
@@ -39,47 +40,89 @@ public final class Validation {
 
     /** Tenant ids end up inside Redis keys, so only a small, safe alphabet is accepted (no ':', '{', '*'). */
     public static String tenantId(JsonNode node) {
-        // TODO(phase-3 M1): a string (400 'id is required') matching TENANT_ID_RE: 3-32 characters of a-z,
-        //   0-9 and inner hyphens (400 'id must be 3-32 characters of a-z, 0-9 and inner hyphens'). Ids end up
-        //   inside Redis keys, so ':', '{' and '*' must never get through.
-        throw new UnsupportedOperationException("TODO(phase-3 M1): Validation.tenantId");
+        if (node == null || !node.isString()) {
+            throw ApiException.validation("id is required");
+        }
+        String id = node.asString();
+        if (!TENANT_ID.matcher(id).matches()) {
+            throw ApiException.validation("id must be 3-32 characters of a-z, 0-9 and inner hyphens");
+        }
+        return id;
     }
 
     public static boolean isTenantId(String value) {
-        // TODO(phase-3 M1): true when the string matches TENANT_ID_RE (used to answer 404 for impossible ids
-        //   without asking Redis).
-        throw new UnsupportedOperationException("TODO(phase-3 M1): Validation.isTenantId");
+        return value != null && TENANT_ID.matcher(value).matches();
     }
 
     public static String tenantName(JsonNode node) {
-        // TODO(phase-3 M1): a string (400 'name is required'), trimmed, 1-80 characters counted as code
-        //   points (400 'name must be 1-80 characters').
-        throw new UnsupportedOperationException("TODO(phase-3 M1): Validation.tenantName");
+        if (node == null || !node.isString()) {
+            throw ApiException.validation("name is required");
+        }
+        String name = node.asString().strip();
+        int length = name.codePointCount(0, name.length());
+        if (length < 1 || length > MAX_NAME) {
+            throw ApiException.validation("name must be 1-80 characters");
+        }
+        return name;
     }
 
     public static Policy policy(JsonNode node) {
-        // TODO(phase-3 M1): an object (400 'policy is required'); algorithm TOKEN_BUCKET or SLIDING_WINDOW;
-        //   limit an INTEGER 1..MAX_LIMIT (booleans and floats are not integers); windowSeconds an integer
-        //   1..MAX_WINDOW_SECONDS. Messages: see the validation tests.
-        throw new UnsupportedOperationException("TODO(phase-3 M1): Validation.policy");
+        if (node == null || !node.isObject()) {
+            throw ApiException.validation("policy is required");
+        }
+        JsonNode algorithm = node.get("algorithm");
+        Algorithm parsed = null;
+        if (algorithm != null && algorithm.isString()) {
+            for (Algorithm a : Algorithm.values()) {
+                if (a.name().equals(algorithm.asString())) {
+                    parsed = a;
+                }
+            }
+        }
+        if (parsed == null) {
+            throw ApiException.validation("policy.algorithm must be TOKEN_BUCKET or SLIDING_WINDOW");
+        }
+        Long limit = integer(node.get("limit"));
+        if (limit == null || limit < 1 || limit > MAX_LIMIT) {
+            throw ApiException.validation("policy.limit must be an integer between 1 and 100000");
+        }
+        Long window = integer(node.get("windowSeconds"));
+        if (window == null || window < 1 || window > MAX_WINDOW_SECONDS) {
+            throw ApiException.validation("policy.windowSeconds must be an integer between 1 and 86400");
+        }
+        return new Policy(parsed, limit.intValue(), window.intValue());
     }
 
     public static String resource(JsonNode node) {
-        // TODO(phase-3 M1): missing/null -> DEFAULT_RESOURCE ('default'); otherwise a string matching
-        //   RESOURCE_RE (1-64 of a-z 0-9 . _ : -), else 400.
-        throw new UnsupportedOperationException("TODO(phase-3 M1): Validation.resource");
+        if (absent(node)) {
+            return DEFAULT_RESOURCE;
+        }
+        if (!node.isString() || !RESOURCE.matcher(node.asString()).matches()) {
+            throw ApiException.validation("resource must be 1-64 characters of a-z, 0-9, '.', '_', ':' and '-'");
+        }
+        return node.asString();
     }
 
     public static int cost(JsonNode node) {
-        // TODO(phase-3 M1): missing/null -> 1; otherwise an integer 1..MAX_COST (1000), else 400 'cost must
-        //   be an integer between 1 and 1000'.
-        throw new UnsupportedOperationException("TODO(phase-3 M1): Validation.cost");
+        if (absent(node)) {
+            return 1;
+        }
+        Long cost = integer(node);
+        if (cost == null || cost < 1 || cost > MAX_COST) {
+            throw ApiException.validation("cost must be an integer between 1 and 1000");
+        }
+        return cost.intValue();
     }
 
     /** A query string: missing -> 60; ASCII digits only, 1..120. */
     public static int minutes(String value) {
-        // TODO(phase-3 M1): a query string: missing -> DEFAULT_MINUTES (60); ASCII digits only and
-        //   1..MAX_MINUTES (120), else 400 'minutes must be an integer between 1 and 120'.
-        throw new UnsupportedOperationException("TODO(phase-3 M1): Validation.minutes");
+        if (value == null) {
+            return DEFAULT_MINUTES;
+        }
+        if (!DIGITS.matcher(value).matches() || value.length() > 9 || Integer.parseInt(value) < 1
+                || Integer.parseInt(value) > MAX_MINUTES) {
+            throw ApiException.validation("minutes must be an integer between 1 and 120");
+        }
+        return Integer.parseInt(value);
     }
 }

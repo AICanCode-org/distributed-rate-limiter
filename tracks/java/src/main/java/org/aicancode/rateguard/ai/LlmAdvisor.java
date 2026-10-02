@@ -2,8 +2,11 @@ package org.aicancode.rateguard.ai;
 
 import java.util.LinkedHashMap;
 import java.util.Map;
+import org.aicancode.rateguard.ai.Advice.Action;
 import org.aicancode.rateguard.domain.Models.Policy;
 import org.aicancode.rateguard.domain.Models.Tenant;
+import org.aicancode.rateguard.domain.Validation;
+import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.json.JsonMapper;
 
 /**
@@ -37,22 +40,75 @@ public class LlmAdvisor {
     }
 
     public Advice advise(Tenant tenant, UsageStats s) throws Exception {
-        // TODO(phase-3 M5): send ONLY numbers: <stats>{policy, stats}</stats> with SYSTEM_PROMPT and 300 max
-        //   tokens (no tenant name, no keys: prompt injection has nothing to work with); parse_advice the
-        //   answer.
-        throw new UnsupportedOperationException("TODO(phase-3 M5): LlmAdvisor.advise");
+        Map<String, Object> facts = new LinkedHashMap<>();
+        facts.put("policy", policyJson(tenant.policy()));
+        facts.put("stats", s.toJson());
+        String answer = client.chat(SYSTEM_PROMPT, "<stats>" + JSON.writeValueAsString(facts) + "</stats>", 300);
+        return parse(answer, tenant.policy());
     }
 
     static String stripFences(String text) {
-        // TODO(phase-3 M5): helper: models like to wrap JSON in ```json fences: remove them.
-        throw new UnsupportedOperationException("TODO(phase-3 M5): LlmAdvisor.stripFences");
+        String t = text.strip();
+        if (t.startsWith("```")) {
+            int newline = t.indexOf('\n');
+            t = newline == -1 ? "" : t.substring(newline + 1);
+            int end = t.lastIndexOf("```");
+            if (end != -1) {
+                t = t.substring(0, end);
+            }
+        }
+        return t.strip();
     }
 
     /** Validate the model's answer like user input. Anything unexpected throws IllegalArgumentException. */
     public static Advice parse(String text, Policy policy) {
-        // TODO(phase-3 M5): treat the model's answer like user input: JSON object, a known action, a limit
-        //   only for RAISE (above the current, at most 10x and MAX_LIMIT) or LOWER (1..current-1), a 1-400
-        //   character summary (whitespace collapsed). Anything else throws.
-        throw new UnsupportedOperationException("TODO(phase-3 M5): LlmAdvisor.parse");
+        JsonNode data;
+        try {
+            data = JSON.readTree(stripFences(text));
+        } catch (RuntimeException e) {
+            throw new IllegalArgumentException("advice is not JSON", e);
+        }
+        if (data == null || !data.isObject()) {
+            throw new IllegalArgumentException("advice must be a JSON object");
+        }
+        JsonNode actionNode = data.get("action");
+        Action action = null;
+        if (actionNode != null && actionNode.isString()) {
+            for (Action a : Action.values()) {
+                if (a.name().equals(actionNode.asString())) {
+                    action = a;
+                }
+            }
+        }
+        if (action == null) {
+            throw new IllegalArgumentException("unknown action");
+        }
+        JsonNode limitNode = data.get("limit");
+        boolean noLimit = limitNode == null || limitNode.isNull();
+        Integer limit = null;
+        if (action == Action.RAISE_LIMIT || action == Action.LOWER_LIMIT) {
+            if (noLimit || !limitNode.isIntegralNumber() || !limitNode.canConvertToInt()) {
+                throw new IllegalArgumentException("limit must be an integer");
+            }
+            limit = limitNode.asInt();
+            int max = Math.min(Validation.MAX_LIMIT, policy.limit() * 10);
+            if (action == Action.RAISE_LIMIT && !(limit > policy.limit() && limit <= max)) {
+                throw new IllegalArgumentException("raised limit out of range");
+            }
+            if (action == Action.LOWER_LIMIT && !(limit >= 1 && limit < policy.limit())) {
+                throw new IllegalArgumentException("lowered limit out of range");
+            }
+        } else if (!noLimit) {
+            throw new IllegalArgumentException(action + " takes no limit");
+        }
+        JsonNode summaryNode = data.get("summary");
+        if (summaryNode == null || !summaryNode.isString()) {
+            throw new IllegalArgumentException("summary must be a string");
+        }
+        String summary = summaryNode.asString().strip();
+        if (summary.isEmpty() || summary.length() > Advice.SUMMARY_MAX) {
+            throw new IllegalArgumentException("summary must be 1-400 characters");
+        }
+        return new Advice(action, limit, String.join(" ", summary.split("\\s+")));
     }
 }

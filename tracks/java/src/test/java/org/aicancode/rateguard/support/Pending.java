@@ -14,21 +14,9 @@ import org.junit.jupiter.api.extension.ExtensionContext;
 public class Pending implements ExecutionCondition {
 
     /** Test class simple name -> milestone. */
-    static final Map<String, String> PENDING = Map.ofEntries(
-            Map.entry("ValidationTest", "Phase 3 M1 - validation"),
-            Map.entry("SecurityTest", "Phase 3 M1 - API keys and the admin token"),
-            Map.entry("TokenBucketTest", "Phase 3 M2 - token bucket"),
-            Map.entry("SlidingWindowTest", "Phase 3 M2 - sliding window counter"),
-            Map.entry("InMemoryStoreTest", "Phase 3 M2 - the in-memory store on your algorithms"),
-            Map.entry("KeysTest", "Phase 3 M3 - Redis key layout"),
-            Map.entry("TenantServiceTest", "Phase 3 M4 - TenantService"),
-            Map.entry("LimiterServiceTest", "Phase 3 M4 - LimiterService"),
-            Map.entry("ApiAdminTest", "Phase 3 M4 - admin endpoints"),
-            Map.entry("ApiLimitsTest", "Phase 3 M4 - limiter endpoints"),
-            Map.entry("AdvisorTest", "Phase 3 M5 - usage stats and the rule advisor"),
-            Map.entry("ApiAdviceTest", "Phase 3 M5 - advice endpoint"),
-            Map.entry("RedisStoreIntegrationTest", "Phase 4 - integration tests"),
-            Map.entry("ApiIntegrationTest", "Phase 4 - integration tests"));
+    static final Map<String, String> PENDING = Map.of(
+            "RedisStoreIntegrationTest", "Phase 4 - integration tests",
+            "ApiIntegrationTest", "Phase 4 - integration tests");
 
     @Override
     public ConditionEvaluationResult evaluateExecutionCondition(ExtensionContext context) {

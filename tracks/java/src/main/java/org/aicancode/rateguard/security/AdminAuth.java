@@ -1,5 +1,6 @@
 package org.aicancode.rateguard.security;
 
+import org.aicancode.rateguard.domain.ApiException;
 
 /** The admin API is protected by one shared bearer token (ADMIN_TOKEN). */
 public class AdminAuth {
@@ -11,9 +12,11 @@ public class AdminAuth {
     }
 
     public void require(String authorization) {
-        // TODO(phase-3 M1): the Authorization header must be 'Bearer <token>' and the token must equal
-        //   ADMIN_TOKEN (constant time); anything else -> 401 unauthorized (the HTTP layer adds WWW-
-        //   Authenticate: Bearer).
-        throw new UnsupportedOperationException("TODO(phase-3 M1): AdminAuth.require");
+        if (authorization == null || !authorization.startsWith("Bearer ")) {
+            throw ApiException.unauthorized();
+        }
+        if (!ApiKeys.constantTimeEquals(authorization.substring("Bearer ".length()).strip(), token)) {
+            throw ApiException.unauthorized();
+        }
     }
 }

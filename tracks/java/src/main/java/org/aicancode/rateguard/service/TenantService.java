@@ -1,10 +1,17 @@
 package org.aicancode.rateguard.service;
 
 import java.time.Clock;
+import java.time.Instant;
 import java.util.List;
 import java.util.function.Supplier;
+import org.aicancode.rateguard.domain.ApiException;
+import org.aicancode.rateguard.domain.DuplicateException;
+import org.aicancode.rateguard.domain.Models.Policy;
 import org.aicancode.rateguard.domain.Models.Tenant;
 import org.aicancode.rateguard.domain.Models.UsagePoint;
+import org.aicancode.rateguard.domain.Times;
+import org.aicancode.rateguard.domain.Validation;
+import org.aicancode.rateguard.security.ApiKeys;
 import org.aicancode.rateguard.store.Store;
 import tools.jackson.databind.JsonNode;
 
@@ -33,55 +40,70 @@ public class TenantService {
     }
 
     public Created create(JsonNode payload) {
-        // TODO(phase-3 M4): validate id, name and policy; new API key; store only its hash and prefix (the
-        //   key is returned ONCE); createdAt = updatedAt = the injected clock. DuplicateError -> 409 tenant-
-        //   exists.
-        throw new UnsupportedOperationException("TODO(phase-3 M4): TenantService.create");
+        JsonNode body = Validation.requireObject(payload);
+        String id = Validation.tenantId(body.get("id"));
+        String name = Validation.tenantName(body.get("name"));
+        Policy policy = Validation.policy(body.get("policy"));
+        String apiKey = newKey.get();
+        Instant now = Times.now(clock);
+        Tenant tenant = new Tenant(id, name, policy, ApiKeys.hash(apiKey), ApiKeys.prefix(apiKey), now, now);
+        try {
+            store.createTenant(tenant);
+        } catch (DuplicateException e) {
+            throw ApiException.tenantExists();
+        }
+        return new Created(tenant, apiKey);
     }
 
     public List<Tenant> list() {
-        // TODO(phase-3 M4): all tenants, sorted by id.
-        throw new UnsupportedOperationException("TODO(phase-3 M4): TenantService.list");
+        return store.listTenants();
     }
 
     public Tenant get(String tenantId) {
-        // TODO(phase-3 M4): an id that is not a valid tenant id is simply 404 not-found 'tenant' (never 400,
-        //   never a Redis call); unknown -> 404.
-        throw new UnsupportedOperationException("TODO(phase-3 M4): TenantService.get");
+        // An id that cannot exist is simply not found (never a 400, never a Redis call).
+        if (!Validation.isTenantId(tenantId)) {
+            throw ApiException.notFound("tenant");
+        }
+        return store.getTenant(tenantId).orElseThrow(() -> ApiException.notFound("tenant"));
     }
 
     public Tenant setPolicy(String tenantId, JsonNode payload) {
-        // TODO(phase-3 M4): get, validate the new policy, bump updatedAt, save (the key hash does not
-        //   change).
-        throw new UnsupportedOperationException("TODO(phase-3 M4): TenantService.setPolicy");
+        Tenant t = get(tenantId);
+        Tenant updated = new Tenant(t.id(), t.name(), Validation.policy(payload), t.keyHash(), t.keyPrefix(),
+                t.createdAt(), Times.now(clock));
+        store.saveTenant(updated, t.keyHash());
+        return updated;
     }
 
     /** A new key; the old one stops working at once. */
     public Created rotateKey(String tenantId) {
-        // TODO(phase-3 M4): get, new key, save with the new hash/prefix (the old key stops working at once),
-        //   return it ONCE.
-        throw new UnsupportedOperationException("TODO(phase-3 M4): TenantService.rotateKey");
+        Tenant t = get(tenantId);
+        String apiKey = newKey.get();
+        Tenant updated = new Tenant(t.id(), t.name(), t.policy(), ApiKeys.hash(apiKey), ApiKeys.prefix(apiKey),
+                t.createdAt(), Times.now(clock));
+        store.saveTenant(updated, t.keyHash());
+        return new Created(updated, apiKey);
     }
 
     public void delete(String tenantId) {
-        // TODO(phase-3 M4): get (404 rules) then delete_tenant.
-        throw new UnsupportedOperationException("TODO(phase-3 M4): TenantService.delete");
+        store.deleteTenant(get(tenantId));
     }
 
     public int reset(String tenantId) {
-        // TODO(phase-3 M4): get (404 rules) then reset the limiter keys.
-        throw new UnsupportedOperationException("TODO(phase-3 M4): TenantService.reset");
+        return store.reset(get(tenantId).id());
     }
 
     public Usage usage(String tenantId, String minutesParam) {
-        // TODO(phase-3 M4): validate minutes, get (404 rules), read the usage points.
-        throw new UnsupportedOperationException("TODO(phase-3 M4): TenantService.usage");
+        int minutes = Validation.minutes(minutesParam);
+        Tenant tenant = get(tenantId);
+        return new Usage(tenant, minutes, store.usage(tenant.id(), minutes));
     }
 
     /** X-API-Key -> tenant. Malformed keys are rejected without touching Redis. */
     public Tenant authenticate(String apiKey) {
-        // TODO(phase-3 M4): malformed key -> 401 invalid-api-key WITHOUT touching Redis; otherwise find the
-        //   tenant by the key's hash; unknown -> 401 invalid-api-key.
-        throw new UnsupportedOperationException("TODO(phase-3 M4): TenantService.authenticate");
+        if (!ApiKeys.looksLikeApiKey(apiKey)) {
+            throw ApiException.invalidApiKey();
+        }
+        return store.findByKeyHash(ApiKeys.hash(apiKey)).orElseThrow(ApiException::invalidApiKey);
     }
 }

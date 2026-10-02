@@ -25,9 +25,14 @@ public class AdvisorService {
     }
 
     public Advice.Result advise(Tenant tenant, UsageStats stats) {
-        // TODO(phase-3 M5): with an LLM: try it; ANY failure (timeout, HTTP error, invalid answer) -> the
-        //   rules with fallback=true and a warning log. Without one: the rules, fallback=false. Advice is never
-        //   applied automatically.
-        throw new UnsupportedOperationException("TODO(phase-3 M5): AdvisorService.advise");
+        if (llm != null) {
+            try {
+                return new Advice.Result("llm", false, llm.advise(tenant, stats));
+            } catch (Exception e) {
+                LOG.warn("LLM advice failed, using the rules: {}", e.getClass().getSimpleName());
+                return new Advice.Result("rules", true, rules.advise(tenant.policy(), stats));
+            }
+        }
+        return new Advice.Result("rules", false, rules.advise(tenant.policy(), stats));
     }
 }
