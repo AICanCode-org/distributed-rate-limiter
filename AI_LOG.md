@@ -154,3 +154,42 @@ Cursor, Claude, a local Ollama model, ...) produced something you kept, changed 
   lists only `ci.yml`; the Actions tab shows no Deploy run.
 * **Time saved / lost (honest guess):** neutral.
 * **What I learned:** consistency across sibling projects is a feature for learners, not just for maintainers.
+
+### 2026-10-02 · Phase 7 · The breaker that "should" open after one timeout
+* **Tool / model:** AI coding agent (shell)
+* **Prompt (summary):**
+  > Write a game-day script that freezes Redis with `docker pause`, sends checks for a CLOSED, an OPEN and a LOCAL tenant, times `/health` under load, then unpauses and reports `/metrics`.
+* **What it produced:** `scripts/game-day.sh` with four phases (baseline, frozen, just after unpause, 6 s
+  later) and a `/metrics` report. Its first summary of the v1.1 run said "the breaker opens after 3
+  requests". The numbers disagreed: the first CLOSED request took ≈ 2 s, the second ≈ 1 s, then
+  milliseconds.
+* **What I kept / changed / rejected and why:** kept the script, corrected the explanation. The breaker
+  counts *store calls*, not requests: a check makes two (the tenant lookup by key hash, then `EVALSHA`), so
+  the first request costs two timeouts, the second one more, and the third failure opens the breaker. The
+  post-mortem says "3 slow store calls (≈ 2 requests) per instance". The second surprise: right after
+  `docker unpause` the CLOSED tenant still got `503` for a moment, because the breaker was inside its 5 s
+  cooldown. That is the design (one trial after the cooldown), so the script now waits 6 s before its last
+  phase, and the runbook explains it.
+* **How I verified it:** the same script against v1.0.0 and v1.1.0 of all three tracks, each tag from its
+  own clean copy in its own Compose project (`rggdwv10`, `rggdwv11`), one after the other; the
+  `rateguard_store_errors_total` counter is 3 per instance in every v1.1 run, and
+  `rateguard_store_short_circuits_total` counts the rest.
+* **Time saved / lost (honest guess):** saved ~1 h of writing; the review took 15 minutes and changed the post-mortem.
+* **What I learned:** a breaker threshold is a number of *calls*. Know how many calls one request makes
+  before you predict when it opens.
+
+### 2026-10-02 · Phase 7 · A tenant cache that could have outlived a key rotation
+* **Tool / model:** AI coding agent
+* **Prompt (summary):**
+  > OPEN and LOCAL tenants still have to be authenticated while Redis is down. How?
+* **What it produced:** an in-memory cache of tenant records by key hash, used on every request to save a
+  Redis round trip.
+* **What I kept / changed / rejected and why:** kept the cache, changed when it is read: only while Redis
+  is unreachable (store error or open breaker). Read on every request, a rotated or deleted key would
+  have kept working on every instance until the cache entry expired, which breaks FR-5 ("the old key stops
+  working at once"). During an outage the trade-off is written down in ADR-0006 and in the API docs.
+* **How I verified it:** unit tests in all three tracks (`ResilienceTest`, `resilience.test.ts`,
+  `test_resilience.py`): with the store up a rotated key gets `401`; with the store down an OPEN tenant seen
+  before is admitted (degraded) and an unknown key gets `503`, never "allowed".
+* **Time saved / lost (honest guess):** saved ~30 min.
+* **What I learned:** a cache in front of an authorisation decision is a security decision. Decide when it may answer.

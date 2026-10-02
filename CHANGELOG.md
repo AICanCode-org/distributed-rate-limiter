@@ -6,6 +6,27 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-10-02
+### Added
+- Circuit breaker in front of Redis (all store calls): 3 failures in a row open it for
+  `REDIS_BREAKER_COOLDOWN_MS` (5 s), then one half-open trial. A frozen Redis now costs three slow
+  calls per instance instead of a 1 s wait on every request. The LLM client of the advisor uses the
+  same breaker (30 s cooldown).
+- Per-tenant `policy.failMode` (ADR-0006): `CLOSED` (default, `503` as in v1.0), `OPEN` (admit) or
+  `LOCAL` (an in-memory limiter per instance with the same algorithms). Degraded decisions carry
+  `X-RateLimit-Degraded: true` and `"degraded": true`. Tenant records written by v1.0 read as `CLOSED`.
+- Last-known-good tenant cache, used only while Redis is unavailable, so `OPEN`/`LOCAL` tenants are
+  still recognised.
+- `/health` answers `200` with `status: DEGRADED` while Redis is down (v1.0: `503`, which made a load
+  balancer drop every instance at once).
+- Request IDs: `X-Request-ID` is validated (or generated), echoed on every response and included in every log line.
+- Structured JSON logs (Logstash JSON in Java, a JSON formatter in Python, pino in TypeScript), one access line per request.
+- `GET /metrics` (Prometheus text): decisions allowed, denied and degraded, store errors, store
+  short-circuits, tenants created, AI fallbacks, LLM short-circuits. Same names in every track.
+- OpenAPI 1.1.0, `REDIS_BREAKER_COOLDOWN_MS` in Compose and `.env.example`.
+- `scripts/game-day.sh` (freezes Redis with `docker pause`) and `docs/postmortem-2026-10-02-redis-freeze.md`.
+- Smoke test: request-ID, `failMode`, `degraded` and `/metrics` checks (64 checks).
+
 ## [1.0.0] - 2026-10-02
 ### Added
 - Requirements (FR-1..16, NFR-1..8, threats T1..T10, user stories with Given/When/Then), architecture

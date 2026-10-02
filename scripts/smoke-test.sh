@@ -147,6 +147,30 @@ check "$(json_str action)" RAISE_LIMIT "75 % denied -> RAISE_LIMIT"
 request GET "/api/v1/admin/tenants/$C" "" admin
 check "$(json_num limit)" 5 "advice is never applied automatically"
 
+# ---- v1.1 resilience + observability (Phase 7) ----
+HEADERS="$(curl -s -o /dev/null -D - -H 'X-Request-ID: smoke-req-1' "$BASE_URL/health" | tr -d '\r')"
+[ "$(header X-Request-ID)" = "smoke-req-1" ] && ok "X-Request-ID is echoed (v1.1)" || bad "X-Request-ID is echoed (v1.1)"
+HEADERS="$(curl -s -o /dev/null -D - -H 'X-Request-ID: bad id with spaces' "$BASE_URL/health" | tr -d '\r')"
+RID="$(header X-Request-ID)"
+[ -n "$RID" ] && [ "$RID" != "bad id with spaces" ] && ok "an unsafe X-Request-ID is replaced (v1.1)" || bad "an unsafe X-Request-ID is replaced (v1.1)"
+request GET "/api/v1/admin/tenants/$B" "" admin
+check "$(json_str failMode)" CLOSED "a policy without failMode is CLOSED (v1.1)"
+request PUT "/api/v1/admin/tenants/$B/policy" '{"algorithm":"SLIDING_WINDOW","limit":2,"windowSeconds":60,"failMode":"LOCAL"}' admin
+expect 200 "PUT policy with failMode LOCAL (v1.1)"
+check "$(json_str failMode)" LOCAL "failMode is stored (v1.1)"
+request PUT "/api/v1/admin/tenants/$B/policy" '{"algorithm":"SLIDING_WINDOW","limit":2,"windowSeconds":60,"failMode":"MAYBE"}' admin
+expect 400 "an unknown failMode is rejected (v1.1)"
+request POST /api/v1/limits/check '{"resource":"smoke-v11"}' "$NEW_KEY_A"
+check "$(json_bool degraded)" false "a normal answer is not degraded (v1.1)"
+[ -z "$(header X-RateLimit-Degraded)" ] && ok "no X-RateLimit-Degraded header while Redis is up (v1.1)" || bad "no X-RateLimit-Degraded header while Redis is up (v1.1)"
+request GET /metrics
+expect 200 "GET /metrics (v1.1)"
+ALLOWED="$(sed -n 's/^rateguard_decisions_allowed_total \([0-9][0-9]*\)$/\1/p' "$TMP")"
+[ "${ALLOWED:-0}" -ge 1 ] 2>/dev/null && ok "rateguard_decisions_allowed_total=$ALLOWED" || bad "rateguard_decisions_allowed_total >= 1"
+CREATED="$(sed -n 's/^rateguard_tenants_created_total \([0-9][0-9]*\)$/\1/p' "$TMP")"
+[ "${CREATED:-0}" -ge 3 ] 2>/dev/null && ok "rateguard_tenants_created_total=$CREATED" || bad "rateguard_tenants_created_total >= 3"
+# ---- end v1.1 ----
+
 # ---- clean up ----
 for t in "$A" "$B" "$C"; do request DELETE "/api/v1/admin/tenants/$t" "" admin; done
 expect 204 "DELETE /admin/tenants/{id}"
