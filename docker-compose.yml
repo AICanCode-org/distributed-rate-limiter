@@ -1,7 +1,28 @@
-# RateGuard local stack (starter): Redis for running a track on your machine.
-#   docker compose up -d redis      then   cd tracks/<track> && make run
-# In Phase 6 you add the app itself as a service (one profile per track).
+# RateGuard local stack. Start Redis only:            docker compose up -d redis
+# Start Redis + one app track:                       docker compose --profile python up --build
+# Two instances of one track sharing Redis (load test): TRACK=java docker compose --profile pair up -d --build
 name: rateguard
+
+x-app-env: &app-env
+  PORT: "8080"
+  REDIS_URL: redis://redis:6379/0
+  REDIS_TIMEOUT_MS: ${REDIS_TIMEOUT_MS:-1000}
+  LUA_DIR: /app/lua
+  # Local development value only. A real deployment sets its own long random token.
+  ADMIN_TOKEN: ${ADMIN_TOKEN:-local-admin-token-change-me-0123456789abcdef}
+  AI_PROVIDER: ${AI_PROVIDER:-offline}
+  LLM_BASE_URL: ${LLM_BASE_URL:-http://ollama:11434/v1}
+  LLM_API_KEY: ${LLM_API_KEY:-}
+  LLM_MODEL: ${LLM_MODEL:-llama3.2:1b}
+  LLM_TIMEOUT_MS: ${LLM_TIMEOUT_MS:-5000}
+
+x-app-common: &app-common
+  environment: *app-env
+  ports:
+    - "${APP_PORT:-8080}:8080"
+  depends_on:
+    redis: { condition: service_healthy }
+  restart: unless-stopped
 
 services:
   redis:
@@ -18,9 +39,46 @@ services:
       timeout: 3s
       retries: 20
 
-  # Optional local LLM (Phase 3 M5):  docker compose --profile ollama up -d
-  # then: docker compose exec ollama ollama pull llama3.2:1b  and run your track with
-  #       AI_PROVIDER=llm LLM_BASE_URL=http://localhost:11434/v1
+  app-java:
+    <<: *app-common
+    profiles: ["java"]
+    build: { context: ., dockerfile: tracks/java/Dockerfile }
+    image: rateguard-java:local
+
+  app-python:
+    <<: *app-common
+    profiles: ["python"]
+    build: { context: ., dockerfile: tracks/python/Dockerfile }
+    image: rateguard-python:local
+
+  app-typescript:
+    <<: *app-common
+    profiles: ["typescript"]
+    build: { context: ., dockerfile: tracks/typescript/Dockerfile }
+    image: rateguard-typescript:local
+
+  # Two instances of the same track behind different ports, one Redis: the limit must hold across both.
+  #   TRACK=python docker compose --profile pair up -d --build && python3 scripts/load-test.py
+  app-a:
+    <<: *app-common
+    profiles: ["pair"]
+    build: { context: ., dockerfile: "tracks/${TRACK:-python}/Dockerfile" }
+    image: "rateguard-${TRACK:-python}:local"
+    ports:
+      - "${APP_A_PORT:-8081}:8080"
+
+  app-b:
+    <<: *app-common
+    profiles: ["pair"]
+    image: "rateguard-${TRACK:-python}:local"
+    depends_on:
+      redis: { condition: service_healthy }
+      app-a: { condition: service_started }
+    ports:
+      - "${APP_B_PORT:-8082}:8080"
+
+  # Optional local LLM:  docker compose --profile python --profile ollama up -d
+  # then: docker compose exec ollama ollama pull llama3.2:1b  and set AI_PROVIDER=llm
   ollama:
     profiles: ["ollama"]
     image: ollama/ollama:latest

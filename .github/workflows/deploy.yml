@@ -1,0 +1,120 @@
+# Continuous delivery (Phase 6).
+#   1. On a version tag (v1.0.0, v1.1.0, ...) build every track's image and push it to GitHub
+#      Container Registry: ghcr.io/<owner>/rateguard-<track>:<version>.
+#   2. OPTIONAL: if the RENDER_DEPLOY_HOOK_URL secret exists, ask Render to deploy the image of the
+#      track in the DEPLOY_TRACK variable (default: python), then smoke-test RENDER_APP_URL.
+#      Without the secret the job succeeds with a notice: nothing in this repo requires a cloud account.
+# Explained step by step in docs/github-actions-explained.md §9-§12 and docs/phase-6-deploy.md.
+name: Deploy
+
+on:
+  push:
+    tags: ["v*.*.*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  image:
+    name: GHCR · ${{ matrix.track }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      packages: write          # push to ghcr.io with the built-in GITHUB_TOKEN
+    strategy:
+      fail-fast: false
+      matrix:
+        track: [java, python, typescript]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Lower-case the image name (GHCR rejects upper-case, our org is "AICanCode-org")
+        id: name
+        run: echo "image=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/rateguard-${{ matrix.track }}" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compute tags and OCI labels
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ steps.name.outputs.image }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha,prefix=sha-
+            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: tracks/${{ matrix.track }}/Dockerfile
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=${{ matrix.track }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.track }}
+
+  render:
+    name: Render (optional)
+    needs: image
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment:
+      name: production
+      url: ${{ vars.RENDER_APP_URL || 'https://render.com' }}
+    env:
+      # Secrets cannot be used in `if:` directly, so we expose them as env vars first.
+      RENDER_DEPLOY_HOOK_URL: ${{ secrets.RENDER_DEPLOY_HOOK_URL }}
+      RENDER_APP_URL: ${{ vars.RENDER_APP_URL }}
+      DEPLOY_TRACK: ${{ vars.DEPLOY_TRACK || 'python' }}
+      # Optional: the ADMIN_TOKEN of the live app, so the full smoke test (it creates and deletes its own
+      # tenants) can run. Without it only /health is checked.
+      SMOKE_ADMIN_TOKEN: ${{ secrets.SMOKE_ADMIN_TOKEN }}
+    steps:
+      - name: No deploy hook configured → skip gracefully
+        if: env.RENDER_DEPLOY_HOOK_URL == ''
+        run: |
+          echo "::notice title=Render deploy skipped::Add the RENDER_DEPLOY_HOOK_URL secret (and the RENDER_APP_URL variable) to the 'production' environment to enable it. See docs/phase-6-deploy.md."
+
+      - uses: actions/checkout@v4
+        if: env.RENDER_DEPLOY_HOOK_URL != ''
+
+      - name: Trigger the Render deploy of this exact image version
+        if: env.RENDER_DEPLOY_HOOK_URL != ''
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          [ "$GITHUB_REF_TYPE" = tag ] || version="sha-${GITHUB_SHA::7}"
+          image="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/rateguard-${DEPLOY_TRACK}:${version}"
+          encoded="$(python3 -c 'import sys, urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' "$image")"
+          echo "Deploying $image"
+          curl -fsS -X POST "${RENDER_DEPLOY_HOOK_URL}&imgURL=${encoded}" -o /dev/null
+
+      - name: Wait for the new version to be healthy (free instances cold-start slowly)
+        if: env.RENDER_DEPLOY_HOOK_URL != '' && env.RENDER_APP_URL != ''
+        run: |
+          for _ in $(seq 1 40); do
+            if curl -fsS "$RENDER_APP_URL/health" | grep -q '"status":"UP"'; then echo "healthy"; exit 0; fi
+            sleep 15
+          done
+          echo "::error::$RENDER_APP_URL/health did not become healthy in 10 minutes"; exit 1
+
+      - name: Smoke test the live URL
+        if: env.RENDER_DEPLOY_HOOK_URL != '' && env.RENDER_APP_URL != '' && env.SMOKE_ADMIN_TOKEN != ''
+        run: scripts/smoke-test.sh "$RENDER_APP_URL"
+
+      - name: No SMOKE_ADMIN_TOKEN → health check only
+        if: env.RENDER_DEPLOY_HOOK_URL != '' && env.RENDER_APP_URL != '' && env.SMOKE_ADMIN_TOKEN == ''
+        run: |
+          echo "::notice title=Smoke test skipped::Add the SMOKE_ADMIN_TOKEN secret (the live ADMIN_TOKEN) to run the full smoke test."
+          curl -fsS "$RENDER_APP_URL/health"

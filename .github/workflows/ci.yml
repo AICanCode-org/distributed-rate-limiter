@@ -1,4 +1,4 @@
-# Full CI (Phase 5). Runs only the tracks whose files changed (plus everything when shared files
+# Full CI (Phase 5, + Docker job in Phase 6). Runs only the tracks whose files changed (plus everything when shared files
 # change), each through the reusable workflow. "ci-ok" is the single check to mark as *required*
 # in branch protection.  Every concept is explained in docs/github-actions-explained.md.
 name: CI
@@ -91,10 +91,44 @@ jobs:
     with:
       track: typescript
 
+  docker:
+    name: Docker · ${{ matrix.track }} image + smoke test
+    needs: changes
+    if: needs.changes.outputs.shared == 'true' || needs.changes.outputs.java == 'true' || needs.changes.outputs.python == 'true' || needs.changes.outputs.typescript == 'true' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        track: [java, python, typescript]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Build image (layer cache stored in the GitHub Actions cache)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: tracks/${{ matrix.track }}/Dockerfile
+          tags: rateguard-${{ matrix.track }}:local
+          load: true
+          push: false
+          cache-from: type=gha,scope=${{ matrix.track }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.track }}
+      - name: Start the stack (app + Redis) and wait until healthy
+        run: docker compose --profile ${{ matrix.track }} up -d --no-build --wait --wait-timeout 180
+      - name: Smoke test
+        run: scripts/smoke-test.sh http://localhost:8080
+      - name: Show logs on failure
+        if: failure()
+        run: docker compose --profile ${{ matrix.track }} logs --no-color
+      - name: Tear down
+        if: always()
+        run: docker compose --profile ${{ matrix.track }} down -v
+
   ci-ok:
     name: ci-ok
     if: always()
-    needs: [changes, contract, java, python, typescript]
+    needs: [changes, contract, java, python, typescript, docker]
     runs-on: ubuntu-latest
     steps:
       - name: Fail if any needed job failed or was cancelled (skipped is fine)

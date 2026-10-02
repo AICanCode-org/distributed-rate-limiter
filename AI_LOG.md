@@ -118,3 +118,39 @@ Cursor, Claude, a local Ollama model, ...) produced something you kept, changed 
 * **Time saved / lost (honest guess):** lost ~20 min, and some trust.
 * **What I learned:** a destructive default (`FLUSHDB` on `localhost:6379`) is only safe on a machine with
   one project. Destructive test setup must be pointed somewhere on purpose.
+
+### 2026-10-02 · Phase 6 · Porting the smoke test from another project
+* **Tool / model:** AI coding agent
+* **Prompt (summary):**
+  > Adapt our blog API smoke test (bash + curl only) to RateGuard: admin API, key rotation, both algorithms, `429` with `Retry-After`, headers, usage, advice and reset.
+* **What it produced:** a 53-check script that reuses the first-occurrence JSON helpers (`grep -o … | head -1`;
+  a greedy `sed` would return the *last* match, and a usage body has many `"allowed"` fields). Two gaps in
+  review: the tenants it created were never deleted, so every run against a live deployment left three
+  tenants (with valid keys) behind; and against a live URL the script needs the real `ADMIN_TOKEN`, which
+  the first version simply assumed was the local Compose value.
+* **What I kept / changed / rejected and why:** every tenant id carries a unique run id and the script
+  deletes its tenants at the end (and checks that the deleted key gets `401`). `SMOKE_ADMIN_TOKEN` comes from
+  a GitHub secret in `deploy.yml`; without it the deploy job only checks `/health` and says so in a notice,
+  instead of failing a release for a missing secret. The loops that only repeat a request use `for _ in`, so
+  shellcheck has no unused variable to complain about.
+* **How I verified it:** the script against the v1.0 images of all three tracks (53/53), again with
+  `AI_PROVIDER=llm` pointing at an unreachable address and `EXPECT_FALLBACK=true`, twice in a row against
+  the same Redis (no collisions, `GET /api/v1/admin/tenants` empty afterwards), and `shellcheck --severity=error`.
+* **Time saved / lost (honest guess):** saved ~1 h.
+* **What I learned:** a smoke test against production is a client of production. It must clean up after
+  itself, and the credentials it needs must be decided before it runs in CI.
+
+### 2026-10-02 · Phase 6 · Where should `deploy.yml` live?
+* **Tool / model:** AI coding agent
+* **Prompt (summary):**
+  > Should the deploy workflow already be on `main` (the starter) so students see it early?
+* **What it produced:** a version that lived on `main` and skipped tracks without a Dockerfile with a notice.
+* **What I kept / changed / rejected and why:** rejected for the course. Students write `deploy.yml`
+  themselves in Phase 6, the sibling projects (SnapLink, DevBlog, ShopFlow) keep it on `solution` only, and a
+  workflow that exists but does nothing on `main` is confusing. The file arrives with the Dockerfiles at
+  `phase-6-end`. Because it triggers on `v*.*.*` tags, the tags of this repository were pushed with Actions
+  disabled, so publishing the course never deployed anything.
+* **How I verified it:** `actionlint` (with shellcheck) on every workflow; `git ls-tree main .github/workflows`
+  lists only `ci.yml`; the Actions tab shows no Deploy run.
+* **Time saved / lost (honest guess):** neutral.
+* **What I learned:** consistency across sibling projects is a feature for learners, not just for maintainers.

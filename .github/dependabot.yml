@@ -20,3 +20,6 @@ updates:
   - package-ecosystem: github-actions
     directory: /
     schedule: { interval: weekly }
+  - package-ecosystem: docker
+    directories: [/tracks/java, /tracks/python, /tracks/typescript]
+    schedule: { interval: weekly }
