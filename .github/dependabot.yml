@@ -1,0 +1,22 @@
+# Dependabot opens PRs for dependency updates. Minor/patch updates are grouped per ecosystem so
+# you get one PR a week instead of twenty. Phase 7 asks you to review and merge one of them.
+version: 2
+updates:
+  - package-ecosystem: maven
+    directory: /tracks/java
+    schedule: { interval: weekly }
+    groups:
+      java-minor-patch: { update-types: [minor, patch] }
+  - package-ecosystem: pip
+    directory: /tracks/python
+    schedule: { interval: weekly }
+    groups:
+      python-minor-patch: { update-types: [minor, patch] }
+  - package-ecosystem: npm
+    directory: /tracks/typescript
+    schedule: { interval: weekly }
+    groups:
+      typescript-minor-patch: { update-types: [minor, patch] }
+  - package-ecosystem: github-actions
+    directory: /
+    schedule: { interval: weekly }

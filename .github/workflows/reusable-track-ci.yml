@@ -1,0 +1,94 @@
+# Reusable workflow: the full check for ONE track. Called by ci.yml once per track.
+# Because every track exposes the same Makefile targets (install, lint, test, coverage), the steps
+# are identical; only the toolchain setup differs.  Explained in docs/github-actions-explained.md §7.
+name: Reusable · track CI
+
+on:
+  workflow_call:
+    inputs:
+      track:
+        description: "java | python | typescript"
+        required: true
+        type: string
+      integration:
+        description: "Run integration tests + coverage gate against a Redis service container"
+        required: false
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: lint · unit · integration · coverage
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    # A throw-away Redis container that lives for this job only.
+    services:
+      redis:
+        image: redis:7.4-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 3s --health-timeout 3s --health-retries 20
+
+    env:
+      # The integration tests use database 15 and FLUSHDB it before each test.
+      TEST_REDIS_URL: redis://localhost:6379/15
+
+    defaults:
+      run:
+        working-directory: tracks/${{ inputs.track }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Java 21 (+ Maven cache)
+        if: inputs.track == 'java'
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: maven
+          cache-dependency-path: tracks/java/pom.xml
+
+      - name: Set up Python 3.12 (+ pip cache)
+        if: inputs.track == 'python'
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: tracks/python/requirements-dev.txt
+
+      - name: Set up Node 22 (+ npm cache)
+        if: inputs.track == 'typescript'
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: tracks/typescript/package-lock.json
+
+      - name: Install dependencies
+        run: make install
+      - name: Lint
+        run: make lint
+      - name: Unit tests
+        run: make test
+
+      - name: Unit + integration tests with coverage gate (≥ 85 % lines)
+        if: inputs.integration
+        run: make coverage
+
+      - name: Upload coverage report
+        if: always() && inputs.integration
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-${{ inputs.track }}
+          path: |
+            tracks/java/target/site/jacoco/
+            tracks/python/coverage.xml
+            tracks/typescript/coverage/
+          if-no-files-found: ignore
+          retention-days: 7
