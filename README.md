@@ -3,6 +3,100 @@
 [![CI](https://github.com/AICanCode-org/distributed-rate-limiter/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/AICanCode-org/distributed-rate-limiter/actions/workflows/ci.yml)
 [![CI (solution)](https://github.com/AICanCode-org/distributed-rate-limiter/actions/workflows/ci.yml/badge.svg?branch=solution)](https://github.com/AICanCode-org/distributed-rate-limiter/actions/workflows/ci.yml?query=branch%3Asolution)
 
+## Case study (reference solution)
+
+> **RateGuard is a rate-limiting service that many API instances can share: one Redis, one atomic Lua
+> script per decision, exact limits across instances, a per-tenant answer to "what if Redis is down?",
+> and an AI advisor that suggests better limits but never changes them. It is built three times, in
+> Java, Python and TypeScript, against one contract.**
+
+```console
+$ curl -s -X POST localhost:8080/api/v1/admin/tenants -H "Authorization: Bearer $ADMIN_TOKEN" -H 'Content-Type: application/json' \
+    -d '{"id":"acme","name":"Acme Inc.","policy":{"algorithm":"TOKEN_BUCKET","limit":3,"windowSeconds":60,"failMode":"LOCAL"}}'
+{"id":"acme", ... ,"keyPrefix":"rg_5c7820", ... ,"apiKey":"rg_5c78202606cbfcb9a25ee572aae1054f"}   # shown once, stored as SHA-256
+$ curl -si -X POST localhost:8080/api/v1/limits/check -H "X-API-Key: $KEY" -H 'Content-Type: application/json' -d '{"resource":"search","cost":1}'
+HTTP/1.1 200 OK
+x-ratelimit-limit: 3
+x-ratelimit-remaining: 2
+{"allowed":true,"tenantId":"acme","resource":"search","cost":1,"algorithm":"TOKEN_BUCKET","limit":3,"remaining":2, ... ,"degraded":false}
+$ # ... two more, then:
+{"allowed":false, ... ,"remaining":0,"resetAfterMs":59967,"retryAfterMs":19968,"degraded":false}
+$ docker compose pause redis          # Redis freezes: the breaker opens after 3 slow calls, LOCAL takes over
+$ curl -si -X POST localhost:8080/api/v1/limits/check -H "X-API-Key: $KEY" -d '{"resource":"search","cost":1}' ...
+HTTP/1.1 200 OK
+x-ratelimit-degraded: true
+{"allowed":true, ... ,"remaining":2, ... ,"degraded":true}                                       # 2.6 ms, decided in memory
+$ curl -s localhost:8080/health
+{"status":"DEGRADED","checks":{"redis":"DOWN"}}
+$ curl -s -X POST localhost:8080/api/v1/admin/tenants/acme/advice -H "Authorization: Bearer $ADMIN_TOKEN"
+{"tenantId":"acme","provider":"rules","fallback":false, ... ,"action":"RAISE_LIMIT","suggestedPolicy":{"algorithm":"TOKEN_BUCKET","limit":5, ...},
+ "summary":"25% of requests were denied (1 of 4). Steady demand is about 4 per minute (90th percentile) against a capacity of 3 per minute. Raise the limit to 5 per 60 s (20% headroom)."}
+```
+
+**Problem → solution.** Most rate-limiter tutorials keep a counter in memory, which stops working the
+moment a second instance starts, or do `GET` then `SET` in Redis, which lets two instances spend the
+same last token. RateGuard handles the parts that make a shared limiter hard on purpose and proves them
+with tests: each decision is one atomic Lua script, Redis `TIME` is the only clock (app servers may
+drift), every key a script touches shares a `{tenantId}` hash tag (Redis Cluster ready), every limiter
+key expires, API keys are stored only as SHA-256 and the admin token is compared in constant time,
+`SCAN` instead of `KEYS`, and a frozen Redis is a tested failure with a per-tenant fail mode. It runs
+on a laptop with one command and needs no API key.
+
+**Architecture.** Stateless API containers (any number, any track) and Redis as the only stateful
+component: see the diagrams and the key layout in [`spec/architecture.md`](spec/architecture.md). Three
+decisions worth discussing:
+1. **Atomic Lua scripts with pure-function twins**: the token bucket and the sliding window counter are
+   pure functions (unit tests with a fake clock) and Lua scripts with identical maths, and the integration
+   tests prove they agree ([ADR-0001](spec/adr/0001-atomic-lua-scripts-with-pure-function-twins.md),
+   [ADR-0002](spec/adr/0002-redis-time-as-the-only-clock.md)).
+2. **Fail closed by default, per tenant from v1.1**: a limiter that cannot decide says `503`, never
+   "allowed" by accident; tenants may choose `OPEN` or `LOCAL` instead, behind a circuit breaker
+   ([ADR-0004](spec/adr/0004-fail-closed-when-redis-is-unavailable.md),
+   [ADR-0006](spec/adr/0006-per-tenant-fail-modes-and-redis-circuit-breaker.md)).
+3. **Hashed API keys, constant-time admin token**: a leaked Redis backup contains no usable key; rotation
+   invalidates the old key at once ([ADR-0005](spec/adr/0005-hashed-api-keys-and-constant-time-admin-token.md)).
+
+**Security and quality evidence (v1.1.0, measured on the maintainers' Linux build box with Docker).**
+
+| | Java 21 / Spring Boot | Python / FastAPI | TypeScript / Fastify |
+|---|---|---|---|
+| Tests (unit + integration) | 153 unit + 18 integration | 192 unit + 18 integration | 156 unit + 18 integration |
+| Line coverage (gate 85 %) | 97 % (JaCoCo) | 99 % (coverage.py) | 99.5 % (V8) |
+| Docker smoke test (`scripts/smoke-test.sh`) | 64/64 (and 64/64 with the LLM unreachable) | 64/64 (and 64/64) | 64/64 (and 64/64) |
+
+Each threat in [`spec/requirements.md`](spec/requirements.md) (T1–T10: keys leaked from a backup,
+timing attacks on the admin token, over-admission across instances, drifting clocks, negative or huge
+costs, key-pattern injection, a leaked key that keeps working, prompt injection into the advisor, a slow
+Redis, retry loops) maps to unit and integration
+tests, and the black-box smoke test re-checks the most important ones against every Docker image.
+`scripts/load-test.py` sends 400 checks through two instances against a limit of 100 and gets exactly
+100 allowed. Every phase tag (`phase-0-end` … `phase-8-end`) builds and passes the tests of all three
+tracks (`scripts/verify-tags.sh`). CI runs lint, unit and integration tests against a Redis service
+container, a coverage gate, contract checks and a Docker smoke test per track. Release tags publish
+images to GHCR.
+
+**Operations.** `/health` checks Redis. `/metrics` exposes eight Prometheus counters (decisions allowed,
+denied and degraded, store errors, store short-circuits, tenants created, AI fallbacks, LLM
+short-circuits), and every log line is JSON with the request's `X-Request-ID`. A **game day** froze
+Redis with `docker pause`: v1.0.0 failed closed as designed, but every check waited the full 1 s timeout
+and `/health` answered `503`, so a load balancer would have dropped every instance at once. v1.1.0 fixed
+it with a circuit breaker and per-tenant fail modes (a CLOSED tenant: 10 checks avg ≈ 0.3 s instead of
+1 s; OPEN and LOCAL tenants answer in 1–4 ms, marked degraded; `/health` `200 DEGRADED` in 2–4 ms):
+[post-mortem](docs/postmortem-2026-10-02-redis-freeze.md), [runbook](docs/runbook.md).
+
+**How AI was used.** Assistants drafted the starter stubs, Dockerfiles, workflow skeletons, test
+scaffolding, the game-day script and first versions of docs. Their output needed the strictest review
+exactly where it mattered: the Lua maths, read-then-write patterns, key handling, field names that
+drifted from the contract, and version-specific framework details. Every suggestion was verified by
+tests, `actionlint`, the smoke test or official documentation, and logged in [`AI_LOG.md`](AI_LOG.md).
+See also [`docs/retrospective.md`](docs/retrospective.md).
+
+**What I'd do next.** A Redis Cluster deployment (the hash tags are ready); a game day in CI with a
+latency assertion; rate limiting and audit logging for the admin API; alerts on degraded decisions;
+client SDKs that cache `Retry-After`.
+
+---
+
 RateGuard is a guided project from **[AiCanCode](https://www.aicancode.org)**. Over 9 phases (about 36
 hours) you build a multi-tenant rate-limiting service like a professional team would: requirements
 and threats, design, a test-first implementation, CI/CD, containers, a game day, observability and a
