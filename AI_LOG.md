@@ -48,3 +48,18 @@ Cursor, Claude, a local Ollama model, ...) produced something you kept, changed 
 * **Time saved / lost (honest guess):** saved ~10 min.
 * **What I learned:** make ports configurable from day one; it costs one line in Compose. (Phase 4 shows
   what happens when *every* setting that points at Redis is not moved along with it.)
+
+### 2026-10-02 · Phase 1 · A field name that existed only in the requirements
+* **Tool / model:** AI coding agent
+* **Prompt (summary):**
+  > Draft FR-14 (the AI policy advisor) and its user story with Given/When/Then acceptance criteria.
+* **What it produced:** a clear requirement, but it said the advice carries a `source` (`rules` | `llm`),
+  and the acceptance criterion checked `source: rules` when the LLM is down. The contract and the tests
+  call it `provider` and add a separate boolean `fallback`; "the rules answered" and "the rules answered
+  *because the LLM failed*" are different facts.
+* **What I kept / changed / rejected and why:** kept the structure, renamed the field to `provider`, added
+  `fallback`, and made the criterion check `fallback: true`.
+* **How I verified it:** `grep` for every field, header, problem type and status code in the requirements
+  against `spec/openapi.yaml`; each acceptance criterion maps to a test name.
+* **Time saved / lost (honest guess):** saved ~1 h of writing; the cross-check took 15 minutes.
+* **What I learned:** requirements and contract drift apart within one draft. Check names, not just ideas.
