@@ -8,6 +8,9 @@ from datetime import datetime
 TOKEN_BUCKET = "TOKEN_BUCKET"
 SLIDING_WINDOW = "SLIDING_WINDOW"
 ALGORITHMS = (TOKEN_BUCKET, SLIDING_WINDOW)
+# v1.1: what a check does while Redis is unavailable (ADR-0006). CLOSED is the v1.0 behaviour.
+CLOSED, OPEN, LOCAL = "CLOSED", "OPEN", "LOCAL"
+FAIL_MODES = (CLOSED, OPEN, LOCAL)
 
 
 @dataclass(frozen=True)
@@ -15,6 +18,7 @@ class Policy:
     algorithm: str
     limit: int
     window_seconds: int
+    fail_mode: str = CLOSED
 
     @property
     def window_ms(self) -> int:
@@ -40,6 +44,7 @@ class Decision:
     remaining: int
     retry_after_ms: int
     reset_after_ms: int
+    degraded: bool = False  # v1.1: decided by the failMode because Redis was unavailable
 
 
 @dataclass(frozen=True)

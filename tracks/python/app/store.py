@@ -9,7 +9,7 @@ import threading
 from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Protocol
+from typing import Protocol, TypeVar
 
 import redis
 from redis.backoff import NoBackoff
@@ -17,9 +17,12 @@ from redis.retry import Retry
 
 from . import keys
 from .algorithms import BucketState, WindowState, sliding_window, token_bucket
+from .breaker import CircuitBreaker, CircuitOpenError
 from .clock import Clock, to_ms, utc_now
 from .errors import DuplicateError, StoreUnavailable
-from .models import TOKEN_BUCKET, Decision, Policy, Tenant, UsagePoint
+from .models import CLOSED, TOKEN_BUCKET, Decision, Policy, Tenant, UsagePoint
+
+T = TypeVar("T")
 
 
 class Store(Protocol):
@@ -145,6 +148,7 @@ def tenant_to_hash(t: Tenant) -> dict[str, str]:
         "algorithm": t.policy.algorithm,
         "limit": str(t.policy.limit),
         "windowSeconds": str(t.policy.window_seconds),
+        "failMode": t.policy.fail_mode,
         "keyHash": t.key_hash,
         "keyPrefix": t.key_prefix,
         "createdAt": str(to_ms(t.created_at)),
@@ -153,7 +157,8 @@ def tenant_to_hash(t: Tenant) -> dict[str, str]:
 
 
 def tenant_from_hash(h: dict[str, str]) -> Tenant:
-    policy = Policy(h["algorithm"], int(h["limit"]), int(h["windowSeconds"]))
+    # A tenant written by v1.0 has no failMode: it keeps the v1.0 behaviour (CLOSED).
+    policy = Policy(h["algorithm"], int(h["limit"]), int(h["windowSeconds"]), h.get("failMode", CLOSED))
     return Tenant(h["id"], h["name"], policy, h["keyHash"], h["keyPrefix"], _dt(h["createdAt"]), _dt(h["updatedAt"]))
 
 
@@ -272,3 +277,66 @@ class RedisStore:
             return out
 
         return self._call(run)
+
+
+# ---------------------------------------------------------------------------------------------------
+class GuardedStore:
+    """v1.1: any store behind a circuit breaker (ADR-0006).
+
+    While Redis keeps failing, every call would wait for REDIS_TIMEOUT_MS before failing. After
+    ``threshold`` failures in a row the breaker opens and calls fail at once with StoreUnavailable,
+    so the limiter can answer from the tenant's failMode in microseconds instead of seconds.
+    DuplicateError is an answer from Redis, not a failure.
+    """
+
+    def __init__(self, inner: Store, breaker: CircuitBreaker, on_error: Callable[[], None] = lambda: None):
+        self.inner = inner
+        self.breaker = breaker
+        self._on_error = on_error
+
+    def _call(self, fn: Callable[[], T]) -> T:
+        try:
+            return self.breaker.call(fn)
+        except CircuitOpenError as exc:
+            raise StoreUnavailable(str(exc)) from None
+        except StoreUnavailable:
+            self._on_error()
+            raise
+
+    def ping(self) -> bool:
+        def run() -> bool:
+            if not self.inner.ping():
+                raise StoreUnavailable("ping failed")
+            return True
+
+        try:
+            return self._call(run)
+        except StoreUnavailable:
+            return False
+
+    def create_tenant(self, tenant: Tenant) -> None:
+        self._call(lambda: self.inner.create_tenant(tenant))
+
+    def get_tenant(self, tenant_id: str) -> Tenant | None:
+        return self._call(lambda: self.inner.get_tenant(tenant_id))
+
+    def list_tenants(self) -> list[Tenant]:
+        return self._call(self.inner.list_tenants)
+
+    def find_by_key_hash(self, key_hash: str) -> Tenant | None:
+        return self._call(lambda: self.inner.find_by_key_hash(key_hash))
+
+    def save_tenant(self, tenant: Tenant, old_key_hash: str) -> None:
+        self._call(lambda: self.inner.save_tenant(tenant, old_key_hash))
+
+    def delete_tenant(self, tenant: Tenant) -> None:
+        self._call(lambda: self.inner.delete_tenant(tenant))
+
+    def reset(self, tenant_id: str) -> int:
+        return self._call(lambda: self.inner.reset(tenant_id))
+
+    def check(self, tenant_id: str, resource: str, policy: Policy, cost: int) -> Decision:
+        return self._call(lambda: self.inner.check(tenant_id, resource, policy, cost))
+
+    def usage(self, tenant_id: str, minutes: int) -> list[UsagePoint]:
+        return self._call(lambda: self.inner.usage(tenant_id, minutes))

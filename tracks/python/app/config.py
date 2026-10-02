@@ -18,6 +18,7 @@ class Settings:
     port: int
     redis_url: str
     redis_timeout_ms: int
+    redis_breaker_cooldown_ms: int  # v1.1: how long the Redis circuit stays open before one trial call
     lua_dir: str
     admin_token: str | None  # None -> a random per-process token (the admin API is locked, logged as a warning)
     ai_provider: str  # "offline" | "llm"
@@ -32,6 +33,7 @@ class Settings:
             port=int(os.getenv("PORT", "8080")),
             redis_url=os.getenv("REDIS_URL", "redis://localhost:6379/0"),
             redis_timeout_ms=int(os.getenv("REDIS_TIMEOUT_MS", "1000")),
+            redis_breaker_cooldown_ms=int(os.getenv("REDIS_BREAKER_COOLDOWN_MS", "5000")),
             lua_dir=os.getenv("LUA_DIR") or _default_lua_dir(),
             admin_token=os.getenv("ADMIN_TOKEN") or None,
             ai_provider=os.getenv("AI_PROVIDER", "offline").lower(),

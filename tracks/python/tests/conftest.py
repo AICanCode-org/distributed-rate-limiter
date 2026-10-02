@@ -68,9 +68,10 @@ def store(clock) -> InMemoryStore:
     return InMemoryStore(clock)
 
 
-def make_client(store, clock, advisor=None):
+def make_client(store, clock, advisor=None, **kwargs):
+    settings = kwargs.pop("settings", None) or test_settings()
     app = create_app(
-        test_settings(), store=store, clock=clock, advisor=advisor or AdvisorService(RuleAdvisor()), new_key=KeyGen()
+        settings, store=store, clock=clock, advisor=advisor or AdvisorService(RuleAdvisor()), new_key=KeyGen(), **kwargs
     )
     return TestClient(app)
 
@@ -98,12 +99,12 @@ class Api:
         limit: int = 5,
         window: int = 60,
         name: str = "Acme Corp",
+        fail_mode: str | None = None,
     ) -> dict:
-        body = {
-            "id": tenant_id,
-            "name": name,
-            "policy": {"algorithm": algorithm, "limit": limit, "windowSeconds": window},
-        }
+        policy: dict = {"algorithm": algorithm, "limit": limit, "windowSeconds": window}
+        if fail_mode:
+            policy["failMode"] = fail_mode
+        body = {"id": tenant_id, "name": name, "policy": policy}
         r = self.client.post("/api/v1/admin/tenants", json=body, headers=ADMIN)
         assert r.status_code == 201, r.text
         return r.json()

@@ -19,6 +19,7 @@ from app.algorithms import sliding_window, token_bucket
 from app.config import Settings
 from app.errors import DuplicateError, StoreUnavailable
 from app.main import create_app
+from app.metrics import Metrics
 from app.models import Policy, Tenant
 from app.store import RedisStore
 from tests.conftest import ADMIN, Api, KeyGen, test_settings
@@ -181,3 +182,24 @@ def test_parallel_http_requests_on_redis():
         with ThreadPoolExecutor(12) as pool:
             list(pool.map(hit, range(30)))
         assert codes.count(200) == 8 and codes.count(429) == 22
+
+
+# ---- v1.1 (Phase 7) ------------------------------------------------------------------------------
+def test_fail_mode_is_stored_and_v1_0_hashes_read_as_closed(rstore):
+    t = tenant(policy=Policy("TOKEN_BUCKET", 5, 60, "LOCAL"))
+    rstore.create_tenant(t)
+    assert rstore.get_tenant("acme").policy.fail_mode == "LOCAL"
+    rstore.r.hdel("rg:tenant:acme", "failMode")  # what a tenant written by v1.0 looks like
+    assert rstore.get_tenant("acme").policy.fail_mode == "CLOSED"
+
+
+def test_a_dead_redis_costs_three_timeouts_then_answers_fast():
+    metrics = Metrics()
+    settings = test_settings(redis_url="redis://127.0.0.1:1/0", redis_timeout_ms=300)
+    with TestClient(create_app(settings, new_key=KeyGen(), metrics=metrics)) as client:
+        started = time.monotonic()
+        for _ in range(20):
+            assert client.get("/health").json()["status"] == "DEGRADED"
+        assert time.monotonic() - started < 5  # 20 x a full timeout would be 6 s or more
+        assert metrics.value("rateguard_store_errors_total") == 3
+        assert metrics.value("rateguard_store_short_circuits_total") == 17

@@ -12,12 +12,14 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Protocol
 
 import httpx
 
+from .breaker import CircuitBreaker
 from .clock import iso_ms
 from .models import Policy, Tenant, UsagePoint
 from .validation import MAX_LIMIT
@@ -237,10 +239,24 @@ class LlmAdvisor:
         return parse_advice(answer, p)
 
 
+class BreakerChat:
+    """v1.1: the LLM behind a circuit breaker, so a dead LLM costs one fast failure, not a timeout per call."""
+
+    def __init__(self, client: Chat, breaker: CircuitBreaker):
+        self._client = client
+        self._breaker = breaker
+
+    def chat(self, system: str, user: str, max_tokens: int) -> str:
+        return self._breaker.call(lambda: self._client.chat(system, user, max_tokens))
+
+
 class AdvisorService:
-    def __init__(self, rules: RuleAdvisor, llm: LlmAdvisor | None = None):
+    def __init__(
+        self, rules: RuleAdvisor, llm: LlmAdvisor | None = None, on_fallback: Callable[[], None] = lambda: None
+    ):
         self._rules = rules
         self._llm = llm
+        self._on_fallback = on_fallback
 
     def advise(self, tenant: Tenant, s: UsageStats) -> AdviceResult:
         if self._llm is not None:
@@ -248,5 +264,6 @@ class AdvisorService:
                 return AdviceResult("llm", False, self._llm.advise(tenant, s))
             except Exception as exc:  # noqa: BLE001 - ANY failure means: use the rules
                 log.warning("LLM advice failed, using the rules: %s", type(exc).__name__)
+                self._on_fallback()
                 return AdviceResult("rules", True, self._rules.advise(tenant.policy, s))
         return AdviceResult("rules", False, self._rules.advise(tenant.policy, s))

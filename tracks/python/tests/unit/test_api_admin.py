@@ -19,7 +19,7 @@ def test_create_tenant_returns_201_location_and_the_key_once(api, client):
     assert r.json() == {
         "id": "acme",
         "name": "Acme Corp",
-        "policy": {"algorithm": "TOKEN_BUCKET", "limit": 5, "windowSeconds": 60},
+        "policy": {"algorithm": "TOKEN_BUCKET", "limit": 5, "windowSeconds": 60, "failMode": "CLOSED"},
         "keyPrefix": "rg_000000",
         "createdAt": "2026-10-02T09:30:00.000Z",
         "updatedAt": "2026-10-02T09:30:00.000Z",
@@ -82,7 +82,12 @@ def test_put_policy(api, client, clock):
         json={"algorithm": "SLIDING_WINDOW", "limit": 100, "windowSeconds": 3600},
     )
     assert r.status_code == 200
-    assert r.json()["policy"] == {"algorithm": "SLIDING_WINDOW", "limit": 100, "windowSeconds": 3600}
+    assert r.json()["policy"] == {
+        "algorithm": "SLIDING_WINDOW",
+        "limit": 100,
+        "windowSeconds": 3600,
+        "failMode": "CLOSED",  # v1.1: the default when a v1.0 client leaves it out
+    }
     assert r.json()["updatedAt"] == "2026-10-02T09:31:00.000Z"
     bad = client.put("/api/v1/admin/tenants/acme/policy", headers=ADMIN, json={"algorithm": "TOKEN_BUCKET"})
     assert bad.status_code == 400

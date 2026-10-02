@@ -12,10 +12,20 @@ def test_advice_offline_for_a_busy_tenant(api, client):
     assert r.status_code == 200
     body = r.json()
     assert (body["tenantId"], body["provider"], body["fallback"]) == ("acme", "rules", False)
-    assert body["currentPolicy"] == {"algorithm": "TOKEN_BUCKET", "limit": 2, "windowSeconds": 3600}
+    assert body["currentPolicy"] == {
+        "algorithm": "TOKEN_BUCKET",
+        "limit": 2,
+        "windowSeconds": 3600,
+        "failMode": "CLOSED",
+    }
     assert body["stats"]["allowed"] == 2 and body["stats"]["denied"] == 3 and body["stats"]["minutes"] == 10
     assert body["action"] == "RAISE_LIMIT"
-    assert body["suggestedPolicy"] == {"algorithm": "TOKEN_BUCKET", "limit": 20, "windowSeconds": 3600}
+    assert body["suggestedPolicy"] == {
+        "algorithm": "TOKEN_BUCKET",
+        "limit": 20,
+        "windowSeconds": 3600,
+        "failMode": "CLOSED",
+    }
     assert body["summary"].startswith("60% of requests were denied (3 of 5).")
     assert body["generatedAt"] == "2026-10-02T09:30:00.000Z"
     # nothing was applied

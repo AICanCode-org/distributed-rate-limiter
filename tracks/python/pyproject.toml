@@ -1,6 +1,6 @@
 [project]
 name = "rateguard-python"
-version = "1.0.0"
+version = "1.1.0"
 description = "RateGuard distributed rate limiter - Python/FastAPI track (AiCanCode)"
 requires-python = ">=3.11"
 

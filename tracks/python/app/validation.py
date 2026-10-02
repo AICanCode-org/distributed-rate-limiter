@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 
 from .errors import validation_error
-from .models import ALGORITHMS, Policy
+from .models import ALGORITHMS, CLOSED, FAIL_MODES, Policy
 
 TENANT_ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]{1,30}[a-z0-9]$", re.ASCII)
 RESOURCE_RE = re.compile(r"^[a-z0-9._:-]{1,64}$", re.ASCII)
@@ -62,7 +62,10 @@ def policy(value: object) -> Policy:
     window = value.get("windowSeconds")
     if not _is_int(window) or not 1 <= window <= MAX_WINDOW_SECONDS:  # type: ignore[operator]
         raise validation_error("policy.windowSeconds must be an integer between 1 and 86400")
-    return Policy(algorithm, limit, window)  # type: ignore[arg-type]
+    fail_mode = value.get("failMode", CLOSED)
+    if fail_mode not in FAIL_MODES:
+        raise validation_error("policy.failMode must be CLOSED, OPEN or LOCAL")
+    return Policy(algorithm, limit, window, fail_mode)  # type: ignore[arg-type]
 
 
 def resource(value: object) -> str:

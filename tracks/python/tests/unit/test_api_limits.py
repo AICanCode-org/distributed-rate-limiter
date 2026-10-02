@@ -15,8 +15,10 @@ def test_check_returns_the_decision_and_headers(api):
         "remaining": 3,
         "resetAfterMs": 24_000,
         "retryAfterMs": 0,
+        "degraded": False,
     }
     assert r.headers["x-ratelimit-limit"] == "5" and r.headers["x-ratelimit-remaining"] == "3"
+    assert "x-ratelimit-degraded" not in r.headers
     assert r.headers["x-ratelimit-reset"] == "24"
 
 

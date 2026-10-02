@@ -7,17 +7,27 @@ from dataclasses import replace
 
 from . import validation as v
 from .clock import Clock
-from .errors import DuplicateError, invalid_api_key, not_found, tenant_exists
+from .errors import DuplicateError, StoreUnavailable, invalid_api_key, not_found, tenant_exists
 from .models import Tenant, UsagePoint
 from .security import hash_api_key, key_prefix, looks_like_api_key, new_api_key
 from .store import Store
 
 
 class TenantService:
-    def __init__(self, store: Store, clock: Clock, new_key: Callable[[], str] = new_api_key):
+    def __init__(
+        self,
+        store: Store,
+        clock: Clock,
+        new_key: Callable[[], str] = new_api_key,
+        on_created: Callable[[], None] = lambda: None,
+    ):
         self.store = store
         self._clock = clock
         self._new_key = new_key
+        self._on_created = on_created
+        # v1.1: the last tenant Redis returned for each key hash, used ONLY while Redis is unavailable,
+        # so a failMode can still be applied to a known tenant (ADR-0006).
+        self._last_known: dict[str, Tenant] = {}
 
     def create(self, payload: object) -> tuple[Tenant, str]:
         """Returns the tenant and its API key. The key is shown ONCE; only its hash is stored."""
@@ -32,6 +42,7 @@ class TenantService:
             self.store.create_tenant(tenant)
         except DuplicateError:
             raise tenant_exists() from None
+        self._on_created()
         return tenant, api_key
 
     def list(self) -> list[Tenant]:
@@ -75,7 +86,16 @@ class TenantService:
         """X-API-Key -> tenant. Malformed keys are rejected without touching Redis."""
         if not looks_like_api_key(api_key):
             raise invalid_api_key()
-        tenant = self.store.find_by_key_hash(hash_api_key(api_key))  # type: ignore[arg-type]
+        key_hash = hash_api_key(api_key)  # type: ignore[arg-type]
+        try:
+            tenant = self.store.find_by_key_hash(key_hash)
+        except StoreUnavailable:
+            cached = self._last_known.get(key_hash)
+            if cached is None:
+                raise  # an unknown key during an outage: nothing to decide with -> 503
+            return cached
         if tenant is None:
+            self._last_known.pop(key_hash, None)
             raise invalid_api_key()
+        self._last_known[key_hash] = tenant
         return tenant

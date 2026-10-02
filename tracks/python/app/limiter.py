@@ -6,8 +6,9 @@ import math
 
 from . import validation as v
 from .errors import ApiError, StoreUnavailable, cost_exceeds_limit, limiter_unavailable, rate_limited
-from .models import Tenant, Verdict
-from .store import Store
+from .metrics import Metrics
+from .models import CLOSED, OPEN, Decision, Tenant, Verdict
+from .store import InMemoryStore, Store
 
 DEMO_RESOURCE = "demo"
 
@@ -17,8 +18,11 @@ def seconds_up(ms: int) -> int:
 
 
 class LimiterService:
-    def __init__(self, store: Store):
+    def __init__(self, store: Store, local: InMemoryStore | None = None, metrics: Metrics | None = None):
         self.store = store
+        # v1.1: the per-instance limiter used by failMode LOCAL while Redis is unavailable
+        self.local = local or InMemoryStore()
+        self.metrics = metrics or Metrics()
 
     def check(self, tenant: Tenant, payload: object) -> Verdict:
         """POST /limits/check: the decision API other services call before doing the work."""
@@ -33,9 +37,24 @@ class LimiterService:
         try:
             decision = self.store.check(tenant.id, resource, tenant.policy, cost)
         except StoreUnavailable:
-            # v1.0 fails CLOSED: without its store the limiter cannot promise anything (ADR-0004).
-            raise limiter_unavailable() from None
+            decision = self._degraded(tenant, resource, cost)
+        self.metrics.inc(
+            "rateguard_decisions_allowed_total" if decision.allowed else "rateguard_decisions_denied_total"
+        )
         return Verdict(tenant, resource, cost, decision)
+
+    def _degraded(self, tenant: Tenant, resource: str, cost: int) -> Decision:
+        """v1.1: Redis is unavailable, so the tenant's failMode decides (ADR-0006)."""
+        mode = tenant.policy.fail_mode
+        if mode == CLOSED:
+            # without its store the limiter cannot promise anything (ADR-0004)
+            raise limiter_unavailable() from None
+        self.metrics.inc("rateguard_degraded_decisions_total")
+        if mode == OPEN:
+            return Decision(True, tenant.policy.limit - cost, 0, 0, degraded=True)
+        # LOCAL: an exact limit per instance (N instances may allow up to N x limit in total)
+        d = self.local.check(tenant.id, resource, tenant.policy, cost)
+        return Decision(d.allowed, d.remaining, d.retry_after_ms, d.reset_after_ms, degraded=True)
 
     def enforce(self, tenant: Tenant, resource: str = DEMO_RESOURCE) -> Verdict:
         """Middleware style: a denied request becomes a 429 problem with Retry-After."""
@@ -54,8 +73,11 @@ class LimiterService:
 
 def rate_limit_headers(verdict: Verdict) -> dict[str, str]:
     d = verdict.decision
-    return {
+    headers = {
         "X-RateLimit-Limit": str(verdict.tenant.policy.limit),
         "X-RateLimit-Remaining": str(d.remaining),
         "X-RateLimit-Reset": str(seconds_up(d.reset_after_ms)),
     }
+    if d.degraded:
+        headers["X-RateLimit-Degraded"] = "true"
+    return headers
