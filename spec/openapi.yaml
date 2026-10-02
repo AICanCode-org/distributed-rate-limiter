@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: RateGuard API
-  version: 1.0.0
+  version: 1.1.0
   summary: A distributed, multi-tenant rate limiter on Redis with an AI policy advisor (AiCanCode course project).
   description: |
     The shared HTTP contract for the Java, Python and TypeScript tracks. All three implement exactly
@@ -20,6 +20,10 @@ info:
       (seconds until the bucket or window is fully replenished, rounded up).
     * v1.0.0 fails **closed**: when Redis is unreachable the limiter answers 503 `limiter-unavailable`
       (ADR-0004).
+    * v1.1.0: a circuit breaker in front of Redis, and a per-tenant `policy.failMode` for outages:
+      `CLOSED` (default, 503), `OPEN` (allow) or `LOCAL` (a per-instance in-memory limiter). Such
+      answers say `degraded: true` and carry `X-RateLimit-Degraded: true`. `GET /health` reports
+      `DEGRADED` (200) while Redis is down. Every response carries `X-Request-ID`; `GET /metrics`.
     * Errors use RFC 9457 `application/problem+json` with `type` = `https://rateguard.example/problems/<slug>`.
     * Timestamps are ISO-8601 UTC with millisecond precision and a `Z` suffix.
   license:
@@ -52,6 +56,28 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Health" }
+
+  /metrics:
+    get:
+      tags: [ops]
+      summary: Prometheus counters (v1.1.0)
+      description: |
+        Counters (identical names in every track): `rateguard_decisions_allowed_total`,
+        `rateguard_decisions_denied_total`, `rateguard_degraded_decisions_total`,
+        `rateguard_store_errors_total`, `rateguard_store_short_circuits_total`,
+        `rateguard_tenants_created_total`, `rateguard_ai_fallback_total`,
+        `rateguard_llm_short_circuits_total`.
+      operationId: metrics
+      responses:
+        "200":
+          description: Prometheus text exposition format 0.0.4
+          content:
+            text/plain:
+              schema: { type: string }
+              example: |
+                # HELP rateguard_decisions_denied_total Limiter checks that were denied.
+                # TYPE rateguard_decisions_denied_total counter
+                rateguard_decisions_denied_total 3
 
   /api/v1/admin/tenants:
     post:
@@ -245,6 +271,7 @@ paths:
             X-RateLimit-Limit: { $ref: "#/components/headers/Limit" }
             X-RateLimit-Remaining: { $ref: "#/components/headers/Remaining" }
             X-RateLimit-Reset: { $ref: "#/components/headers/Reset" }
+            X-RateLimit-Degraded: { $ref: "#/components/headers/Degraded" }
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Decision" }
@@ -328,6 +355,9 @@ components:
     Reset:
       description: Seconds until the bucket or window is fully replenished (rounded up)
       schema: { type: integer }
+    Degraded:
+      description: "Present (value true) when Redis was unavailable and failMode decided"
+      schema: { type: string, enum: ["true"] }
 
   responses:
     ValidationError:
@@ -384,7 +414,7 @@ components:
       type: object
       required: [status, checks]
       properties:
-        status: { type: string, enum: [UP, DOWN] }
+        status: { type: string, enum: [UP, DOWN, DEGRADED] }
         checks:
           type: object
           required: [redis]
@@ -395,6 +425,10 @@ components:
       type: string
       enum: [TOKEN_BUCKET, SLIDING_WINDOW]
 
+    FailMode:
+      type: string
+      enum: [CLOSED, OPEN, LOCAL]
+      description: What a check does while Redis is unavailable (v1.1.0, default CLOSED)
 
     Policy:
       type: object
@@ -403,6 +437,7 @@ components:
         algorithm: { $ref: "#/components/schemas/Algorithm" }
         limit: { type: integer, minimum: 1, maximum: 100000 }
         windowSeconds: { type: integer, minimum: 1, maximum: 86400 }
+        failMode: { $ref: "#/components/schemas/FailMode" }
 
     CreateTenantRequest:
       type: object
@@ -439,7 +474,7 @@ components:
 
     Decision:
       type: object
-      required: [allowed, tenantId, resource, cost, algorithm, limit, remaining, resetAfterMs, retryAfterMs]
+      required: [allowed, tenantId, resource, cost, algorithm, limit, remaining, resetAfterMs, retryAfterMs, degraded]
       properties:
         allowed: { type: boolean }
         tenantId: { type: string }
@@ -450,6 +485,7 @@ components:
         remaining: { type: integer }
         resetAfterMs: { type: integer, description: ms until fully replenished }
         retryAfterMs: { type: integer, description: "ms until this cost could pass (0 when allowed)" }
+        degraded: { type: boolean, description: "true when Redis was unavailable and failMode decided" }
 
     Usage:
       type: object
