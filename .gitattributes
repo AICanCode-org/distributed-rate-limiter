@@ -1,0 +1,7 @@
+# Keep LF line endings in the repo on every OS. Without this, Windows checkouts turn shell scripts
+# into CRLF and they fail inside Linux containers / WSL with "/usr/bin/env: 'bash\r'".
+* text=auto eol=lf
+*.cmd text eol=crlf
+*.bat text eol=crlf
+*.png binary
+*.jpg binary

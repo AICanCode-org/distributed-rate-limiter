@@ -1,0 +1,21 @@
+[project]
+name = "rateguard-python"
+version = "1.0.0"
+description = "RateGuard distributed rate limiter - Python/FastAPI track (AiCanCode)"
+requires-python = ">=3.11"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q -m 'not integration'"
+markers = ["integration: needs a real Redis (run `make test-integration`)"]
+
+[tool.coverage.run]
+source = ["app"]
+omit = ["app/__main__.py", "app/asgi.py"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "BLE"]

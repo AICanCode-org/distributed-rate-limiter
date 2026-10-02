@@ -1,0 +1,62 @@
+# Starter CI: lint + unit tests for every track on every push and pull request.
+# Pending tests are skipped, so this is green on day one. In Phase 5 you replace this file with the
+# full pipeline (path filters, integration tests with service containers, coverage gate, Docker).
+# Every concept used here is explained in docs/github-actions-explained.md.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: ${{ matrix.track }} · lint + unit
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        track: [java, python, typescript]
+    defaults:
+      run:
+        working-directory: tracks/${{ matrix.track }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - if: matrix.track == 'java'
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: maven
+          cache-dependency-path: tracks/java/pom.xml
+
+      - if: matrix.track == 'python'
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: tracks/python/requirements-dev.txt
+
+      - if: matrix.track == 'typescript'
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: tracks/typescript/package-lock.json
+
+      - name: Install dependencies
+        run: make install
+      - name: Lint
+        run: make lint
+      - name: Unit tests
+        run: make test

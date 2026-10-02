@@ -1,0 +1,508 @@
+openapi: 3.1.0
+info:
+  title: RateGuard API
+  version: 1.0.0
+  summary: A distributed, multi-tenant rate limiter on Redis with an AI policy advisor (AiCanCode course project).
+  description: |
+    The shared HTTP contract for the Java, Python and TypeScript tracks. All three implement exactly
+    this, and the same black-box smoke test (`scripts/smoke-test.sh`) runs against each of them.
+
+    * Two kinds of caller. **Admins** manage tenants with `Authorization: Bearer <ADMIN_TOKEN>`.
+      **Tenants** (the services being protected) call the limiter with `X-API-Key: rg_<32 hex>`.
+    * An API key is shown once (create and rotate) and stored only as a SHA-256 hash; responses show
+      `keyPrefix` (the first 9 characters) so a key can be recognised in a list.
+    * Two algorithms: `TOKEN_BUCKET` (bursts up to `limit`, refills `limit` tokens per window) and
+      `SLIDING_WINDOW` (a weighted two-window counter). Each check is one atomic Lua script in Redis,
+      on the Redis clock, so any number of app instances share one exact limit (ADR-0001, ADR-0002).
+    * `POST /api/v1/limits/check` always answers 200 with `allowed: true|false` (the caller decides what
+      to do); `GET /api/v1/demo/hello` shows the middleware style: 429 + `Retry-After` when denied.
+    * Every limiter answer carries `X-RateLimit-Limit`, `X-RateLimit-Remaining` and `X-RateLimit-Reset`
+      (seconds until the bucket or window is fully replenished, rounded up).
+    * v1.0.0 fails **closed**: when Redis is unreachable the limiter answers 503 `limiter-unavailable`
+      (ADR-0004).
+    * Errors use RFC 9457 `application/problem+json` with `type` = `https://rateguard.example/problems/<slug>`.
+    * Timestamps are ISO-8601 UTC with millisecond precision and a `Z` suffix.
+  license:
+    name: MIT
+    identifier: MIT
+servers:
+  - url: http://localhost:8080
+    description: Local (any track)
+tags:
+  - name: admin
+  - name: limits
+  - name: ai
+  - name: ops
+
+paths:
+  /health:
+    get:
+      tags: [ops]
+      summary: Liveness and Redis health
+      operationId: health
+      responses:
+        "200":
+          description: The app and Redis are up (v1.1.0 also answers 200 `DEGRADED` while Redis is down)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Health" }
+              example: { status: UP, checks: { redis: UP } }
+        "503":
+          description: Redis is unreachable (v1.0.0)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Health" }
+
+  /api/v1/admin/tenants:
+    post:
+      tags: [admin]
+      summary: Create a tenant and its first API key
+      description: The response is the only time the API key is shown. Only its SHA-256 hash is stored.
+      operationId: createTenant
+      security: [{ admin: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CreateTenantRequest" }
+            example: { id: acme, name: Acme Corp, policy: { algorithm: TOKEN_BUCKET, limit: 100, windowSeconds: 60 } }
+      responses:
+        "201":
+          description: Created
+          headers:
+            Location: { schema: { type: string }, description: "/api/v1/admin/tenants/{id}" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TenantWithKey" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "409":
+          description: The id is taken (`tenant-exists`)
+          content:
+            application/problem+json:
+              schema: { $ref: "#/components/schemas/Problem" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+    get:
+      tags: [admin]
+      summary: All tenants, sorted by id
+      operationId: listTenants
+      security: [{ admin: [] }]
+      responses:
+        "200":
+          description: The tenants (never their keys)
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items: { type: array, items: { $ref: "#/components/schemas/Tenant" } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+
+  /api/v1/admin/tenants/{id}:
+    parameters: [{ $ref: "#/components/parameters/TenantId" }]
+    get:
+      tags: [admin]
+      summary: One tenant
+      operationId: getTenant
+      security: [{ admin: [] }]
+      responses:
+        "200":
+          description: The tenant
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Tenant" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+    delete:
+      tags: [admin]
+      summary: Delete a tenant, its key, its limiter state and its usage history
+      operationId: deleteTenant
+      security: [{ admin: [] }]
+      responses:
+        "204": { description: Deleted (the key stops working at once) }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+
+  /api/v1/admin/tenants/{id}/policy:
+    parameters: [{ $ref: "#/components/parameters/TenantId" }]
+    put:
+      tags: [admin]
+      summary: Replace the tenant's policy
+      description: Takes effect on the next check. Existing buckets and windows are kept (use reset to clear them).
+      operationId: setPolicy
+      security: [{ admin: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/Policy" }
+      responses:
+        "200":
+          description: The updated tenant
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Tenant" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+
+  /api/v1/admin/tenants/{id}/rotate-key:
+    parameters: [{ $ref: "#/components/parameters/TenantId" }]
+    post:
+      tags: [admin]
+      summary: Issue a new API key; the old one stops working at once
+      operationId: rotateKey
+      security: [{ admin: [] }]
+      responses:
+        "200":
+          description: The tenant with its new key (shown once)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TenantWithKey" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+
+  /api/v1/admin/tenants/{id}/reset:
+    parameters: [{ $ref: "#/components/parameters/TenantId" }]
+    post:
+      tags: [admin]
+      summary: Forget the tenant's buckets and windows (full limits again); the usage history is kept
+      operationId: resetTenant
+      security: [{ admin: [] }]
+      responses:
+        "204": { description: Reset }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+
+  /api/v1/admin/tenants/{id}/usage:
+    parameters: [{ $ref: "#/components/parameters/TenantId" }]
+    get:
+      tags: [admin]
+      summary: Allowed and denied checks per minute (oldest first, zeros included)
+      operationId: tenantUsage
+      security: [{ admin: [] }]
+      parameters: [{ $ref: "#/components/parameters/Minutes" }]
+      responses:
+        "200":
+          description: The usage series
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Usage" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+
+  /api/v1/admin/tenants/{id}/advice:
+    parameters: [{ $ref: "#/components/parameters/TenantId" }]
+    post:
+      tags: [admin, ai]
+      summary: AI policy advice from the recent usage (never applied automatically)
+      description: |
+        The statistics are computed by code. The explanation and the suggested action come from the offline
+        rule advisor (default) or, with `AI_PROVIDER=llm`, from an OpenAI-compatible LLM whose answer is
+        validated; any LLM failure falls back to the rules with `fallback: true`. Apply a suggestion yourself
+        with `PUT /policy`.
+      operationId: tenantAdvice
+      security: [{ admin: [] }]
+      parameters: [{ $ref: "#/components/parameters/Minutes" }]
+      responses:
+        "200":
+          description: The advice
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Advice" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+
+  /api/v1/limits/check:
+    post:
+      tags: [limits]
+      summary: May this tenant spend `cost` units on `resource` now?
+      description: |
+        Always 200 when the check could be made: read `allowed`. Each resource has its own bucket or window.
+      operationId: checkLimit
+      security: [{ apiKey: [] }]
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CheckRequest" }
+            example: { resource: orders.create, cost: 1 }
+      responses:
+        "200":
+          description: The decision
+          headers:
+            X-RateLimit-Limit: { $ref: "#/components/headers/Limit" }
+            X-RateLimit-Remaining: { $ref: "#/components/headers/Remaining" }
+            X-RateLimit-Reset: { $ref: "#/components/headers/Reset" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Decision" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/InvalidApiKey" }
+        "422":
+          description: The cost is above the tenant's limit, so it could never pass (`cost-exceeds-limit`)
+          content:
+            application/problem+json:
+              schema: { $ref: "#/components/schemas/Problem" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+
+  /api/v1/demo/hello:
+    get:
+      tags: [limits]
+      summary: A demo endpoint protected by the limiter (resource `demo`, cost 1)
+      operationId: hello
+      security: [{ apiKey: [] }]
+      responses:
+        "200":
+          description: Allowed
+          headers:
+            X-RateLimit-Limit: { $ref: "#/components/headers/Limit" }
+            X-RateLimit-Remaining: { $ref: "#/components/headers/Remaining" }
+            X-RateLimit-Reset: { $ref: "#/components/headers/Reset" }
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [message, tenantId]
+                properties:
+                  message: { type: string, example: "Hello, Acme Corp!" }
+                  tenantId: { type: string }
+        "401": { $ref: "#/components/responses/InvalidApiKey" }
+        "429":
+          description: Denied (`rate-limited`). `Retry-After` is in whole seconds, at least 1.
+          headers:
+            Retry-After: { schema: { type: integer, minimum: 1 } }
+            X-RateLimit-Limit: { $ref: "#/components/headers/Limit" }
+            X-RateLimit-Remaining: { $ref: "#/components/headers/Remaining" }
+            X-RateLimit-Reset: { $ref: "#/components/headers/Reset" }
+          content:
+            application/problem+json:
+              schema: { $ref: "#/components/schemas/Problem" }
+              example:
+                type: https://rateguard.example/problems/rate-limited
+                title: Too many requests
+                status: 429
+                detail: "limit of 2 per 60 s reached, retry in 30 s"
+        "503": { $ref: "#/components/responses/Unavailable" }
+
+components:
+  securitySchemes:
+    admin:
+      type: http
+      scheme: bearer
+      description: The shared ADMIN_TOKEN
+    apiKey:
+      type: apiKey
+      in: header
+      name: X-API-Key
+
+  parameters:
+    TenantId:
+      name: id
+      in: path
+      required: true
+      schema: { type: string, pattern: "^[a-z0-9][a-z0-9-]{1,30}[a-z0-9]$" }
+    Minutes:
+      name: minutes
+      in: query
+      schema: { type: integer, minimum: 1, maximum: 120, default: 60 }
+
+  headers:
+    Limit:
+      description: The tenant's limit per window
+      schema: { type: integer }
+    Remaining:
+      description: Units left right now (rounded down)
+      schema: { type: integer }
+    Reset:
+      description: Seconds until the bucket or window is fully replenished (rounded up)
+      schema: { type: integer }
+
+  responses:
+    ValidationError:
+      description: Invalid input (`validation-error`)
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/Problem" }
+          example:
+            type: https://rateguard.example/problems/validation-error
+            title: Validation failed
+            status: 400
+            detail: "policy.limit must be an integer between 1 and 100000"
+    Unauthorized:
+      description: "Missing or wrong admin token (`unauthorized`, with header WWW-Authenticate: Bearer)"
+      headers:
+        WWW-Authenticate: { schema: { type: string }, description: "Bearer" }
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/Problem" }
+    InvalidApiKey:
+      description: Missing, malformed, unknown or rotated API key (`invalid-api-key`)
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/Problem" }
+    NotFound:
+      description: No such tenant (`not-found`)
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/Problem" }
+    Unavailable:
+      description: Redis is unreachable and the limiter fails closed (`limiter-unavailable`, Retry-After 1)
+      headers:
+        Retry-After: { schema: { type: integer } }
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/Problem" }
+          example:
+            type: https://rateguard.example/problems/limiter-unavailable
+            title: Limiter unavailable
+            status: 503
+            detail: the rate-limit store is unavailable
+
+  schemas:
+    Problem:
+      type: object
+      required: [type, title, status]
+      properties:
+        type: { type: string, format: uri }
+        title: { type: string }
+        status: { type: integer }
+        detail: { type: string }
+
+    Health:
+      type: object
+      required: [status, checks]
+      properties:
+        status: { type: string, enum: [UP, DOWN] }
+        checks:
+          type: object
+          required: [redis]
+          properties:
+            redis: { type: string, enum: [UP, DOWN] }
+
+    Algorithm:
+      type: string
+      enum: [TOKEN_BUCKET, SLIDING_WINDOW]
+
+
+    Policy:
+      type: object
+      required: [algorithm, limit, windowSeconds]
+      properties:
+        algorithm: { $ref: "#/components/schemas/Algorithm" }
+        limit: { type: integer, minimum: 1, maximum: 100000 }
+        windowSeconds: { type: integer, minimum: 1, maximum: 86400 }
+
+    CreateTenantRequest:
+      type: object
+      required: [id, name, policy]
+      properties:
+        id: { type: string, pattern: "^[a-z0-9][a-z0-9-]{1,30}[a-z0-9]$" }
+        name: { type: string, minLength: 1, maxLength: 80, description: Trimmed }
+        policy: { $ref: "#/components/schemas/Policy" }
+
+    Tenant:
+      type: object
+      required: [id, name, policy, keyPrefix, createdAt, updatedAt]
+      properties:
+        id: { type: string }
+        name: { type: string }
+        policy: { $ref: "#/components/schemas/Policy" }
+        keyPrefix: { type: string, example: rg_3f9a1c }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+
+    TenantWithKey:
+      allOf:
+        - { $ref: "#/components/schemas/Tenant" }
+        - type: object
+          required: [apiKey]
+          properties:
+            apiKey: { type: string, pattern: "^rg_[0-9a-f]{32}$", description: Shown once }
+
+    CheckRequest:
+      type: object
+      properties:
+        resource: { type: string, pattern: "^[a-z0-9._:-]{1,64}$", default: default }
+        cost: { type: integer, minimum: 1, maximum: 1000, default: 1 }
+
+    Decision:
+      type: object
+      required: [allowed, tenantId, resource, cost, algorithm, limit, remaining, resetAfterMs, retryAfterMs]
+      properties:
+        allowed: { type: boolean }
+        tenantId: { type: string }
+        resource: { type: string }
+        cost: { type: integer }
+        algorithm: { $ref: "#/components/schemas/Algorithm" }
+        limit: { type: integer }
+        remaining: { type: integer }
+        resetAfterMs: { type: integer, description: ms until fully replenished }
+        retryAfterMs: { type: integer, description: "ms until this cost could pass (0 when allowed)" }
+
+    Usage:
+      type: object
+      required: [tenantId, minutes, totals, series]
+      properties:
+        tenantId: { type: string }
+        minutes: { type: integer }
+        totals:
+          type: object
+          required: [allowed, denied]
+          properties:
+            allowed: { type: integer }
+            denied: { type: integer }
+        series:
+          type: array
+          items:
+            type: object
+            required: [minute, allowed, denied]
+            properties:
+              minute: { type: string, format: date-time }
+              allowed: { type: integer }
+              denied: { type: integer }
+
+    Stats:
+      type: object
+      required: [minutes, allowed, denied, deniedPercent, peakPerMinute, peakMinute, peakMinuteDenied,
+                 medianPerMinute, p90PerMinute, activeMinutes, capacityPerMinute]
+      properties:
+        minutes: { type: integer }
+        allowed: { type: integer }
+        denied: { type: integer }
+        deniedPercent: { type: integer, description: Rounded down }
+        peakPerMinute: { type: integer }
+        peakMinute: { type: [string, "null"], format: date-time }
+        peakMinuteDenied: { type: integer }
+        medianPerMinute: { type: integer, description: Lower median of the minutes with traffic }
+        p90PerMinute: { type: integer, description: Nearest-rank 90th percentile of the minutes with traffic }
+        activeMinutes: { type: integer }
+        capacityPerMinute: { type: integer, description: "limit * 60 / windowSeconds, rounded down" }
+
+    Advice:
+      type: object
+      required: [tenantId, provider, fallback, currentPolicy, stats, action, suggestedPolicy, summary, generatedAt]
+      properties:
+        tenantId: { type: string }
+        provider: { type: string, enum: [rules, llm] }
+        fallback: { type: boolean, description: true when the LLM failed and the rules answered }
+        currentPolicy: { $ref: "#/components/schemas/Policy" }
+        stats: { $ref: "#/components/schemas/Stats" }
+        action: { type: string, enum: [KEEP, RAISE_LIMIT, LOWER_LIMIT, INVESTIGATE] }
+        suggestedPolicy:
+          oneOf:
+            - { $ref: "#/components/schemas/Policy" }
+            - { type: "null" }
+        summary: { type: string, maxLength: 400 }
+        generatedAt: { type: string, format: date-time }

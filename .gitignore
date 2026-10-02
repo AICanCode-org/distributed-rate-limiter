@@ -1,0 +1,30 @@
+# Secrets — never commit them (use .env locally, GitHub Secrets in CI)
+.env
+*.pem
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# Node / TypeScript
+node_modules/
+dist/
+coverage/
+
+# Java
+target/
+*.class
+
+# IDEs / OS
+.idea/
+*.iml
+.vscode/*
+!.vscode/extensions.json
+.DS_Store
+Thumbs.db

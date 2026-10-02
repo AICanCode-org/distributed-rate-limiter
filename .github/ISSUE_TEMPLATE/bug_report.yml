@@ -1,0 +1,39 @@
+name: Bug report
+description: Something does not behave as the spec says
+title: "bug: <short description>"
+labels: ["bug"]
+body:
+  - type: dropdown
+    id: track
+    attributes:
+      label: Track
+      options: ["Java", "Python", "TypeScript", "Shared / docs / CI"]
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: Exact commands or curl requests. Never paste a real password or token.
+      placeholder: |
+        1. docker compose --profile python up -d --build
+        2. curl -i -X POST localhost:8080/api/v1/auth/register -H 'Content-Type: application/json' -d '{"email":"asha@example.com","password":"correct-horse-1","displayName":"Asha"}'
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected (quote spec/openapi.yaml or spec/requirements.md if you can)
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual (status code, body, logs)
+    validations:
+      required: true
+  - type: input
+    id: env
+    attributes:
+      label: Environment
+      placeholder: "Windows 11 + WSL2 Ubuntu 24.04, Docker Desktop 4.x, tag phase-3-end"

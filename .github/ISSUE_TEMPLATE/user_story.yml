@@ -1,0 +1,33 @@
+name: User story
+description: A small, testable slice of user value (Phase 1 creates these)
+title: "US-<n>: <short title>"
+labels: ["user-story"]
+body:
+  - type: textarea
+    id: story
+    attributes:
+      label: Story
+      description: As a <persona>, I want <capability>, so that <benefit>.
+      placeholder: As Ravi (backend developer at a tenant), I want a Retry-After header on every 429, so that my client backs off for exactly as long as needed.
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria (Given / When / Then)
+      placeholder: |
+        - Given my limit is used up, when I call /limits/check, then I get 429 with Retry-After in whole seconds
+        - Given my old key after a rotation, when I call /limits/check, then I get 401
+    validations:
+      required: true
+  - type: dropdown
+    id: milestone
+    attributes:
+      label: Phase 3 milestone
+      options: ["M1 validation + security", "M2 algorithms (token bucket, sliding window)", "M3 Redis keys + store", "M4 tenants + limiter + API", "M5 usage stats + AI advisor", "Later"]
+    validations:
+      required: true
+  - type: textarea
+    id: notes
+    attributes:
+      label: Notes / out of scope

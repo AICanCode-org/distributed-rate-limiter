@@ -1,0 +1,44 @@
+{
+  "cms_file": "distributed-rate-limiter",
+  "slug": "distributed-rate-limiter",
+  "title": "RateGuard: Distributed Rate Limiter with Redis, Lua and an AI Policy Advisor",
+  "tagline": "Build a multi-tenant rate-limiting service whose limits hold across every instance, survive a Redis outage and never over-admit, with AI as your pair programmer",
+  "description": "Over nine phases you build RateGuard like a professional team: requirements and threats, design with ADRs, a test-first implementation of a token bucket and a sliding window counter as pure functions and as atomic Redis Lua scripts that use one clock, a Redis Cluster-ready key layout with hash tags, tenants with SHA-256 hashed API keys and a constant-time admin token, the standard rate-limit headers and Retry-After, per-minute usage statistics and an AI policy advisor with an offline fallback, integration tests that race parallel requests for the last token, CI/CD with GitHub Actions, Docker, optional free-tier deployment, a game day that freezes Redis, a circuit breaker with per-tenant fail modes, observability and a retrospective. Pick Java, Python or TypeScript; the spec, the Lua scripts and the tests are shared. Everything runs on your laptop, and the AI feature works offline.",
+  "difficulty": "advanced",
+  "tech_stack": ["Redis", "Lua", "Docker", "GitHub Actions", "OpenAPI", "SHA-256"],
+  "tracks": [
+    {"id": "java", "label": "Java", "tech_stack": ["Java 21", "Spring Boot", "Lettuce", "JUnit 5", "JaCoCo"], "folder": "tracks/java"},
+    {"id": "python", "label": "Python", "tech_stack": ["Python 3.11+", "FastAPI", "redis-py", "pytest"], "folder": "tracks/python"},
+    {"id": "typescript", "label": "TypeScript", "tech_stack": ["Node.js 20+", "TypeScript", "Fastify", "ioredis", "Vitest"], "folder": "tracks/typescript"}
+  ],
+  "prerequisites": [
+    {"title": "Git and the command line basics", "url": null},
+    {"title": "One of: Java, Python or TypeScript fundamentals", "url": null},
+    {"title": "REST APIs and HTTP status codes", "url": null},
+    {"title": "Basic concurrency: what a race condition is", "url": null}
+  ],
+  "outcomes": [
+    "Turn a multi-tenant API brief into testable requirements, user stories and a threat list (stolen keys, over-admission across instances, key-pattern injection, retry storms)",
+    "Compare rate-limiting algorithms and implement a token bucket and a sliding window counter as pure, exhaustively tested functions",
+    "Make limiter decisions atomic across instances with Redis Lua scripts, one clock (Redis TIME) and parity tests against the pure functions",
+    "Design a Redis key layout that is Redis Cluster ready (hash tags), expires idle state and never uses KEYS",
+    "Secure a service with hashed, rotatable API keys and a constant-time admin token, and prove every refusal with tests",
+    "Add an AI policy advisor whose output is validated, never auto-applied and falls back to deterministic rules offline",
+    "Build CI/CD with GitHub Actions: matrix, caching, reusable workflows, Redis service containers, GHCR",
+    "Run a game day that freezes Redis, write a blameless post-mortem and add a circuit breaker with per-tenant fail modes",
+    "Add request IDs, JSON logs and metrics, and keep v1.0 and v1.1 data compatible both ways",
+    "Use AI assistants deliberately and verify every output"
+  ],
+  "ai_feature": "AI policy advisor: reads a tenant's per-minute usage statistics and suggests KEEP, RAISE_LIMIT, LOWER_LIMIT or INVESTIGATE with a plain-language summary. Offline deterministic rules by default, optional Ollama or a free Gemini/Groq key; the output is validated, never applied automatically, and no rate-limit decision depends on the AI",
+  "requires_paid_services": false,
+  "access": {"default": "pro", "plans": ["pro", "elite", "campus"], "free_phases": [0]},
+  "repo": {
+    "url": "https://github.com/AICanCode-org/distributed-rate-limiter",
+    "starter_ref": "main",
+    "solution_ref": "solution",
+    "phase_tags": ["phase-0-end", "phase-1-end", "phase-2-end", "phase-3-end", "phase-4-end", "phase-5-end", "phase-6-end", "phase-7-end", "phase-8-end"],
+    "releases": ["v1.0.0", "v1.1.0"]
+  },
+  "live_demo_url": null,
+  "portfolio_blurb": "Built RateGuard, a multi-tenant distributed rate limiter: token bucket and sliding window counter as pure functions and as atomic Redis Lua scripts (parity-tested, Redis TIME as the only clock), proven by parallel requests across instances to never over-admit; a Redis Cluster-ready key layout with hash tags; SHA-256 hashed, rotatable API keys; standard rate-limit headers; an AI policy advisor with validated output and offline fallback; >=85 % test coverage; GitHub Actions CI/CD to GHCR; Docker; and, after a game day that froze Redis, a circuit breaker with per-tenant fail modes (closed, open, local), request IDs, JSON logs and metrics."
+}

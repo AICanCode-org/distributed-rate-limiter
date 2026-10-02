@@ -1,0 +1,134 @@
+from datetime import UTC, datetime, timedelta
+
+import pytest
+from fastapi.testclient import TestClient
+
+from app.advisor import AdvisorService, RuleAdvisor
+from app.config import Settings
+from app.main import create_app
+from app.store import InMemoryStore
+
+# ---------------------------------------------------------------------------
+# PENDING tests describe behaviour you have not built yet, so they are skipped
+# (reported as "s" by pytest). When you start a milestone, delete its line here,
+# watch the tests fail (red), implement until they pass (green). See docs/phase-3.
+# ---------------------------------------------------------------------------
+PENDING: dict[str, str] = {
+    "test_validation.py": "Phase 3 M1 - validation",
+    "test_security.py": "Phase 3 M1 - API keys and the admin token",
+    "test_token_bucket.py": "Phase 3 M2 - token bucket",
+    "test_sliding_window.py": "Phase 3 M2 - sliding window counter",
+    "test_memory_store.py": "Phase 3 M2 - the in-memory store on your algorithms",
+    "test_keys.py": "Phase 3 M3 - Redis key layout",
+    "test_tenants.py": "Phase 3 M4 - TenantService",
+    "test_limiter.py": "Phase 3 M4 - LimiterService",
+    "test_api_admin.py": "Phase 3 M4 - admin endpoints",
+    "test_api_limits.py": "Phase 3 M4 - limiter endpoints",
+    "test_advisor.py": "Phase 3 M5 - usage stats and the rule advisor",
+    "test_api_advice.py": "Phase 3 M5 - advice endpoint",
+    "test_redis_integration.py": "Phase 4 - integration tests",
+}
+
+
+def pytest_collection_modifyitems(config, items):
+    for item in items:
+        reason = PENDING.get(item.path.name)
+        if reason:
+            item.add_marker(pytest.mark.skip(reason=f"PENDING ({reason}) - see tests/conftest.py"))
+
+
+ADMIN_TOKEN = "test-admin-token-at-least-32-characters"
+
+
+class FakeClock:
+    """A clock you can move. Tests should never depend on the real time."""
+
+    def __init__(self, start: datetime | None = None):
+        self.now = start or datetime(2026, 10, 2, 9, 30, tzinfo=UTC)
+
+    def __call__(self) -> datetime:
+        return self.now
+
+    def advance(self, **kwargs):
+        self.now = self.now + timedelta(**kwargs)
+
+
+class KeyGen:
+    """Predictable API keys: rg_000...001, rg_000...002, ..."""
+
+    def __init__(self):
+        self.n = 0
+
+    def __call__(self) -> str:
+        self.n += 1
+        return f"rg_{self.n:032x}"
+
+
+def test_settings(**overrides) -> Settings:
+    base = Settings.from_env()
+    return Settings(**{**base.__dict__, "admin_token": ADMIN_TOKEN, "ai_provider": "offline", **overrides})
+
+
+test_settings.__test__ = False  # not a test, despite the name
+
+
+@pytest.fixture
+def clock() -> FakeClock:
+    return FakeClock()
+
+
+@pytest.fixture
+def store(clock) -> InMemoryStore:
+    return InMemoryStore(clock)
+
+
+def make_client(store, clock, advisor=None):
+    app = create_app(
+        test_settings(), store=store, clock=clock, advisor=advisor or AdvisorService(RuleAdvisor()), new_key=KeyGen()
+    )
+    return TestClient(app)
+
+
+@pytest.fixture
+def client(store, clock):
+    """The real FastAPI app on the in-memory store (no Redis, no network)."""
+    with make_client(store, clock) as c:
+        yield c
+
+
+ADMIN = {"Authorization": f"Bearer {ADMIN_TOKEN}"}
+
+
+class Api:
+    """Small helpers so API tests read like the user stories."""
+
+    def __init__(self, client: TestClient):
+        self.client = client
+
+    def tenant(
+        self,
+        tenant_id: str = "acme",
+        algorithm: str = "TOKEN_BUCKET",
+        limit: int = 5,
+        window: int = 60,
+        name: str = "Acme Corp",
+    ) -> dict:
+        body = {
+            "id": tenant_id,
+            "name": name,
+            "policy": {"algorithm": algorithm, "limit": limit, "windowSeconds": window},
+        }
+        r = self.client.post("/api/v1/admin/tenants", json=body, headers=ADMIN)
+        assert r.status_code == 201, r.text
+        return r.json()
+
+    def check(self, api_key: str, **body):
+        return self.client.post("/api/v1/limits/check", json=body or None, headers={"X-API-Key": api_key})
+
+    def hello(self, api_key: str):
+        return self.client.get("/api/v1/demo/hello", headers={"X-API-Key": api_key})
+
+
+@pytest.fixture
+def api(client) -> Api:
+    return Api(client)
