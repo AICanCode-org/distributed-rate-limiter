@@ -6,9 +6,7 @@ import { describe } from "vitest";
 // its line here, watch the tests fail (red), implement until they pass (green).
 // See docs/phase-3.
 // ---------------------------------------------------------------------------
-export const PENDING = new Set<string>([
-  "integration", // Phase 4 - integration tests
-]);
+export const PENDING = new Set<string>([]);
 
 /** `const describe = pendingDescribe("codes")` - a describe that is skipped while the topic is pending. */
 export const pendingDescribe = (topic: string) => describe.skipIf(PENDING.has(topic));

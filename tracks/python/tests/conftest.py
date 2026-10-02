@@ -13,9 +13,7 @@ from app.store import InMemoryStore
 # (reported as "s" by pytest). When you start a milestone, delete its line here,
 # watch the tests fail (red), implement until they pass (green). See docs/phase-3.
 # ---------------------------------------------------------------------------
-PENDING: dict[str, str] = {
-    "test_redis_integration.py": "Phase 4 - integration tests",
-}
+PENDING: dict[str, str] = {}
 
 
 def pytest_collection_modifyitems(config, items):

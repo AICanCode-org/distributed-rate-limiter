@@ -14,9 +14,7 @@ import org.junit.jupiter.api.extension.ExtensionContext;
 public class Pending implements ExecutionCondition {
 
     /** Test class simple name -> milestone. */
-    static final Map<String, String> PENDING = Map.of(
-            "RedisStoreIntegrationTest", "Phase 4 - integration tests",
-            "ApiIntegrationTest", "Phase 4 - integration tests");
+    static final Map<String, String> PENDING = Map.of();
 
     @Override
     public ConditionEvaluationResult evaluateExecutionCondition(ExtensionContext context) {

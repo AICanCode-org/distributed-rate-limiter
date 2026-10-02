@@ -98,3 +98,23 @@ Cursor, Claude, a local Ollama model, ...) produced something you kept, changed 
   three methods without a hint (`Keys.tenant`, `Keys.apiKey`, `UsageStats.toJson`), which were added.
 * **Time saved / lost (honest guess):** neutral.
 * **What I learned:** "unused" is relative to the current state of the code. A starter is deliberately incomplete.
+
+### 2026-10-02 · Phase 4 · The integration tests flushed somebody else's database
+* **Tool / model:** AI coding agent (shell)
+* **Prompt (summary):**
+  > Run the Python integration tests against the dev Redis.
+* **What it produced:** a green run, against the wrong Redis. Our dev Redis had been moved to another port
+  in Phase 0, but `TEST_REDIS_URL` was not set, so the tests used their default
+  `redis://localhost:6379/15`: the Redis of a *different* project on the same machine. The suite's
+  `FLUSHDB` emptied that project's database 15 before every test.
+* **What I kept / changed / rejected and why:** stopped, set `TEST_REDIS_URL` explicitly for every later
+  run (in our scripts, not just in a shell), reported to the owner of the other project which database had
+  been flushed, and wrote the warning into Phase 0, Phase 4 and the test files ("never point it at data you
+  care about"). Rejected the idea of making the tests "safer" by checking that database 15 is empty first:
+  a test suite that refuses to run after its own previous run is worse, and the real fix is pointing it
+  at the right server.
+* **How I verified it:** `redis-cli -p <dev port> -n 15 DBSIZE` changes during a run and the other
+  server's does not; CI uses its own service container, where flushing is harmless.
+* **Time saved / lost (honest guess):** lost ~20 min, and some trust.
+* **What I learned:** a destructive default (`FLUSHDB` on `localhost:6379`) is only safe on a machine with
+  one project. Destructive test setup must be pointed somewhere on purpose.
