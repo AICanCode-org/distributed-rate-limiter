@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 
 from .errors import validation_error
-from .models import Policy
+from .models import ALGORITHMS, Policy
 
 TENANT_ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]{1,30}[a-z0-9]$", re.ASCII)
 RESOURCE_RE = re.compile(r"^[a-z0-9._:-]{1,64}$", re.ASCII)
@@ -30,45 +30,61 @@ def _is_int(value: object) -> bool:
 
 def tenant_id(value: object) -> str:
     """Tenant ids end up inside Redis keys, so only a small, safe alphabet is accepted (no ':', '{', '*')."""
-    # TODO(phase-3 M1): a string (400 'id is required') matching TENANT_ID_RE: 3-32 characters of
-    #   a-z, 0-9 and inner hyphens (400 'id must be 3-32 characters of a-z, 0-9 and inner hyphens').
-    #   Ids end up inside Redis keys, so ':', '{' and '*' must never get through.
-    raise NotImplementedError("TODO(phase-3 M1): tenant_id")
+    if not isinstance(value, str):
+        raise validation_error("id is required")
+    if not TENANT_ID_RE.match(value):
+        raise validation_error("id must be 3-32 characters of a-z, 0-9 and inner hyphens")
+    return value
 
 
 def is_tenant_id(value: str) -> bool:
-    # TODO(phase-3 M1): true when the string matches TENANT_ID_RE (used to answer 404 for impossible
-    #   ids without asking Redis).
-    raise NotImplementedError("TODO(phase-3 M1): is_tenant_id")
+    return bool(TENANT_ID_RE.match(value))
 
 
 def tenant_name(value: object) -> str:
-    # TODO(phase-3 M1): a string (400 'name is required'), trimmed, 1-80 characters counted as code
-    #   points (400 'name must be 1-80 characters').
-    raise NotImplementedError("TODO(phase-3 M1): tenant_name")
+    if not isinstance(value, str):
+        raise validation_error("name is required")
+    name = value.strip()
+    if not 1 <= len(name) <= MAX_NAME:
+        raise validation_error("name must be 1-80 characters")
+    return name
 
 
 def policy(value: object) -> Policy:
-    # TODO(phase-3 M1): an object (400 'policy is required'); algorithm TOKEN_BUCKET or
-    #   SLIDING_WINDOW; limit an INTEGER 1..MAX_LIMIT (booleans and floats are not integers);
-    #   windowSeconds an integer 1..MAX_WINDOW_SECONDS. Messages: see the validation tests.
-    raise NotImplementedError("TODO(phase-3 M1): policy")
+    if not isinstance(value, dict):
+        raise validation_error("policy is required")
+    algorithm = value.get("algorithm")
+    if algorithm not in ALGORITHMS:
+        raise validation_error("policy.algorithm must be TOKEN_BUCKET or SLIDING_WINDOW")
+    limit = value.get("limit")
+    if not _is_int(limit) or not 1 <= limit <= MAX_LIMIT:  # type: ignore[operator]
+        raise validation_error("policy.limit must be an integer between 1 and 100000")
+    window = value.get("windowSeconds")
+    if not _is_int(window) or not 1 <= window <= MAX_WINDOW_SECONDS:  # type: ignore[operator]
+        raise validation_error("policy.windowSeconds must be an integer between 1 and 86400")
+    return Policy(algorithm, limit, window)  # type: ignore[arg-type]
 
 
 def resource(value: object) -> str:
-    # TODO(phase-3 M1): missing/null -> DEFAULT_RESOURCE ('default'); otherwise a string matching
-    #   RESOURCE_RE (1-64 of a-z 0-9 . _ : -), else 400.
-    raise NotImplementedError("TODO(phase-3 M1): resource")
+    if value is None:
+        return DEFAULT_RESOURCE
+    if not isinstance(value, str) or not RESOURCE_RE.match(value):
+        raise validation_error("resource must be 1-64 characters of a-z, 0-9, '.', '_', ':' and '-'")
+    return value
 
 
 def cost(value: object) -> int:
-    # TODO(phase-3 M1): missing/null -> 1; otherwise an integer 1..MAX_COST (1000), else 400 'cost
-    #   must be an integer between 1 and 1000'.
-    raise NotImplementedError("TODO(phase-3 M1): cost")
+    if value is None:
+        return 1
+    if not _is_int(value) or not 1 <= value <= MAX_COST:  # type: ignore[operator]
+        raise validation_error("cost must be an integer between 1 and 1000")
+    return value  # type: ignore[return-value]
 
 
 def minutes(value: str | None) -> int:
     """A query string: missing -> 60; ASCII digits only, 1..120."""
-    # TODO(phase-3 M1): a query string: missing -> DEFAULT_MINUTES (60); ASCII digits only and
-    #   1..MAX_MINUTES (120), else 400 'minutes must be an integer between 1 and 120'.
-    raise NotImplementedError("TODO(phase-3 M1): minutes")
+    if value is None:
+        return DEFAULT_MINUTES
+    if not (value.isascii() and value.isdigit()) or not 1 <= int(value) <= MAX_MINUTES:
+        raise validation_error("minutes must be an integer between 1 and 120")
+    return int(value)

@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import replace
 
+from . import validation as v
 from .clock import Clock
+from .errors import DuplicateError, invalid_api_key, not_found, tenant_exists
 from .models import Tenant, UsagePoint
-from .security import new_api_key
+from .security import hash_api_key, key_prefix, looks_like_api_key, new_api_key
 from .store import Store
 
 
@@ -18,46 +21,61 @@ class TenantService:
 
     def create(self, payload: object) -> tuple[Tenant, str]:
         """Returns the tenant and its API key. The key is shown ONCE; only its hash is stored."""
-        # TODO(phase-3 M4): validate id, name and policy; new API key; store only its hash and
-        #   prefix (the key is returned ONCE); createdAt = updatedAt = the injected clock.
-        #   DuplicateError -> 409 tenant-exists.
-        raise NotImplementedError("TODO(phase-3 M4): TenantService.create")
+        body = v.require_object(payload)
+        tenant_id = v.tenant_id(body.get("id"))
+        name = v.tenant_name(body.get("name"))
+        policy = v.policy(body.get("policy"))
+        api_key = self._new_key()
+        now = self._clock()
+        tenant = Tenant(tenant_id, name, policy, hash_api_key(api_key), key_prefix(api_key), now, now)
+        try:
+            self.store.create_tenant(tenant)
+        except DuplicateError:
+            raise tenant_exists() from None
+        return tenant, api_key
 
     def list(self) -> list[Tenant]:
-        # TODO(phase-3 M4): all tenants, sorted by id.
-        raise NotImplementedError("TODO(phase-3 M4): TenantService.list")
+        return self.store.list_tenants()
 
     def get(self, tenant_id: str) -> Tenant:
         # An id that cannot exist is simply not found (never a 400, never a Redis call).
-        # TODO(phase-3 M4): an id that is not a valid tenant id is simply 404 not-found 'tenant'
-        #   (never 400, never a Redis call); unknown -> 404.
-        raise NotImplementedError("TODO(phase-3 M4): TenantService.get")
+        tenant = self.store.get_tenant(tenant_id) if v.is_tenant_id(tenant_id) else None
+        if tenant is None:
+            raise not_found("tenant")
+        return tenant
 
     def set_policy(self, tenant_id: str, payload: object) -> Tenant:
-        # TODO(phase-3 M4): get, validate the new policy, bump updatedAt, save (the key hash does
-        #   not change).
-        raise NotImplementedError("TODO(phase-3 M4): TenantService.set_policy")
+        tenant = self.get(tenant_id)
+        updated = replace(tenant, policy=v.policy(payload), updated_at=self._clock())
+        self.store.save_tenant(updated, tenant.key_hash)
+        return updated
 
     def rotate_key(self, tenant_id: str) -> tuple[Tenant, str]:
         """A new key; the old one stops working at once."""
-        # TODO(phase-3 M4): get, new key, save with the new hash/prefix (the old key stops working
-        #   at once), return it ONCE.
-        raise NotImplementedError("TODO(phase-3 M4): TenantService.rotate_key")
+        tenant = self.get(tenant_id)
+        api_key = self._new_key()
+        updated = replace(
+            tenant, key_hash=hash_api_key(api_key), key_prefix=key_prefix(api_key), updated_at=self._clock()
+        )
+        self.store.save_tenant(updated, tenant.key_hash)
+        return updated, api_key
 
     def delete(self, tenant_id: str) -> None:
-        # TODO(phase-3 M4): get (404 rules) then delete_tenant.
-        raise NotImplementedError("TODO(phase-3 M4): TenantService.delete")
+        self.store.delete_tenant(self.get(tenant_id))
 
     def reset(self, tenant_id: str) -> int:
-        # TODO(phase-3 M4): get (404 rules) then reset the limiter keys.
-        raise NotImplementedError("TODO(phase-3 M4): TenantService.reset")
+        return self.store.reset(self.get(tenant_id).id)
 
     def usage(self, tenant_id: str, minutes_param: str | None) -> tuple[Tenant, int, list[UsagePoint]]:
-        # TODO(phase-3 M4): validate minutes, get (404 rules), read the usage points.
-        raise NotImplementedError("TODO(phase-3 M4): TenantService.usage")
+        minutes = v.minutes(minutes_param)
+        tenant = self.get(tenant_id)
+        return tenant, minutes, self.store.usage(tenant.id, minutes)
 
     def authenticate(self, api_key: str | None) -> Tenant:
         """X-API-Key -> tenant. Malformed keys are rejected without touching Redis."""
-        # TODO(phase-3 M4): malformed key -> 401 invalid-api-key WITHOUT touching Redis; otherwise
-        #   find the tenant by the key's hash; unknown -> 401 invalid-api-key.
-        raise NotImplementedError("TODO(phase-3 M4): TenantService.authenticate")
+        if not looks_like_api_key(api_key):
+            raise invalid_api_key()
+        tenant = self.store.find_by_key_hash(hash_api_key(api_key))  # type: ignore[arg-type]
+        if tenant is None:
+            raise invalid_api_key()
+        return tenant

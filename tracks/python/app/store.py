@@ -139,15 +139,22 @@ def _dt(ms: str) -> datetime:
 
 
 def tenant_to_hash(t: Tenant) -> dict[str, str]:
-    # TODO(phase-3 M3): the tenant as a flat string map for HSET: id, name, algorithm, limit,
-    #   windowSeconds, keyHash, keyPrefix, createdAt/updatedAt as epoch ms.
-    raise NotImplementedError("TODO(phase-3 M3): tenant_to_hash")
+    return {
+        "id": t.id,
+        "name": t.name,
+        "algorithm": t.policy.algorithm,
+        "limit": str(t.policy.limit),
+        "windowSeconds": str(t.policy.window_seconds),
+        "keyHash": t.key_hash,
+        "keyPrefix": t.key_prefix,
+        "createdAt": str(to_ms(t.created_at)),
+        "updatedAt": str(to_ms(t.updated_at)),
+    }
 
 
 def tenant_from_hash(h: dict[str, str]) -> Tenant:
-    # TODO(phase-3 M3): the reverse of tenant_to_hash (numbers parsed, epoch ms back to UTC
-    #   datetimes).
-    raise NotImplementedError("TODO(phase-3 M3): tenant_from_hash")
+    policy = Policy(h["algorithm"], int(h["limit"]), int(h["windowSeconds"]))
+    return Tenant(h["id"], h["name"], policy, h["keyHash"], h["keyPrefix"], _dt(h["createdAt"]), _dt(h["updatedAt"]))
 
 
 class RedisStore:
@@ -155,9 +162,10 @@ class RedisStore:
 
     def __init__(self, client: redis.Redis, lua_dir: str):
         self.r = client
-        self.lua_dir = Path(lua_dir)
-        # TODO(phase-3 M3): load spec/lua/token_bucket.lua and sliding_window.lua (you wrote them in Phase 2)
-        #   with client.register_script(...): it sends EVALSHA and falls back to EVAL when Redis answers NOSCRIPT.
+        lua = Path(lua_dir)
+        # register_script sends EVALSHA and falls back to EVAL (and caches) when Redis answers NOSCRIPT.
+        self._token_bucket = client.register_script((lua / "token_bucket.lua").read_text())
+        self._sliding_window = client.register_script((lua / "sliding_window.lua").read_text())
 
     @staticmethod
     def from_url(url: str, timeout_ms: int, lua_dir: str) -> RedisStore:
@@ -183,46 +191,84 @@ class RedisStore:
             return False
 
     def create_tenant(self, tenant: Tenant) -> None:
-        # TODO(phase-3 M3): SADD rg:tenants <id>; 0 means the id exists -> DuplicateError (Redis
-        #   decides the race, not the app). Then in ONE MULTI/EXEC: HSET the tenant hash and SET
-        #   rg:key:<hash> <id>.
-        raise NotImplementedError("TODO(phase-3 M3): RedisStore.create_tenant")
+        def run():
+            # SADD answers 0 when the id is already a member: Redis, not the app, decides the race.
+            if self.r.sadd(keys.TENANTS, tenant.id) == 0:
+                raise DuplicateError(tenant.id)
+            pipe = self.r.pipeline(transaction=True)
+            pipe.hset(keys.tenant_key(tenant.id), mapping=tenant_to_hash(tenant))
+            pipe.set(keys.api_key_key(tenant.key_hash), tenant.id)
+            pipe.execute()
+
+        self._call(run)
 
     def get_tenant(self, tenant_id: str) -> Tenant | None:
-        # TODO(phase-3 M3): HGETALL rg:tenant:<id>; empty -> null.
-        raise NotImplementedError("TODO(phase-3 M3): RedisStore.get_tenant")
+        h = self._call(lambda: self.r.hgetall(keys.tenant_key(tenant_id)))
+        return tenant_from_hash(h) if h else None
 
     def list_tenants(self) -> list[Tenant]:
-        # TODO(phase-3 M3): SMEMBERS rg:tenants, sorted by id, then HGETALL each one in a pipeline.
-        raise NotImplementedError("TODO(phase-3 M3): RedisStore.list_tenants")
+        def run():
+            ids = sorted(self.r.smembers(keys.TENANTS))
+            pipe = self.r.pipeline(transaction=False)
+            for tenant_id in ids:
+                pipe.hgetall(keys.tenant_key(tenant_id))
+            return [tenant_from_hash(h) for h in pipe.execute() if h]
+
+        return self._call(run)
 
     def find_by_key_hash(self, key_hash: str) -> Tenant | None:
-        # TODO(phase-3 M3): GET rg:key:<hash> -> tenant id -> get_tenant; unknown -> null.
-        raise NotImplementedError("TODO(phase-3 M3): RedisStore.find_by_key_hash")
+        tenant_id = self._call(lambda: self.r.get(keys.api_key_key(key_hash)))
+        return self.get_tenant(tenant_id) if tenant_id else None
 
     def save_tenant(self, tenant: Tenant, old_key_hash: str) -> None:
-        # TODO(phase-3 M3): ONE MULTI/EXEC: HSET the hash; if the key hash changed, DEL the old
-        #   rg:key:<old> and SET the new one (the old key stops working at once).
-        raise NotImplementedError("TODO(phase-3 M3): RedisStore.save_tenant")
+        def run():
+            pipe = self.r.pipeline(transaction=True)  # MULTI/EXEC: all or nothing
+            pipe.hset(keys.tenant_key(tenant.id), mapping=tenant_to_hash(tenant))
+            if old_key_hash != tenant.key_hash:
+                pipe.delete(keys.api_key_key(old_key_hash))
+                pipe.set(keys.api_key_key(tenant.key_hash), tenant.id)
+            pipe.execute()
+
+        self._call(run)
 
     def delete_tenant(self, tenant: Tenant) -> None:
-        # TODO(phase-3 M3): ONE MULTI/EXEC: DEL the tenant hash, its rg:key and its usage ring, SREM
-        #   from rg:tenants; then reset() the limiter keys.
-        raise NotImplementedError("TODO(phase-3 M3): RedisStore.delete_tenant")
+        def run():
+            pipe = self.r.pipeline(transaction=True)
+            pipe.delete(keys.tenant_key(tenant.id), keys.api_key_key(tenant.key_hash), keys.usage_key(tenant.id))
+            pipe.srem(keys.TENANTS, tenant.id)
+            pipe.execute()
+
+        self._call(run)
+        self.reset(tenant.id)
 
     def reset(self, tenant_id: str) -> int:
-        # TODO(phase-3 M3): SCAN (never KEYS) for tenant_pattern, keep the usage ring, DEL the rest;
-        #   return how many were deleted.
-        raise NotImplementedError("TODO(phase-3 M3): RedisStore.reset")
+        def run():
+            # SCAN walks the keyspace in small steps; KEYS would block Redis for everyone.
+            doomed = [k for k in self.r.scan_iter(match=keys.tenant_pattern(tenant_id), count=500)]
+            doomed = [k for k in doomed if k != keys.usage_key(tenant_id)]
+            return self.r.delete(*doomed) if doomed else 0
+
+        return self._call(run)
 
     def check(self, tenant_id: str, resource: str, policy: Policy, cost: int, now_ms: int | None = None) -> Decision:
-        # TODO(phase-3 M3): ONE script call (EVALSHA, EVAL on NOSCRIPT): token_bucket.lua or
-        #   sliding_window.lua with KEYS = [limiter key, usage key] and ARGV = [limit, window_ms, cost
-        #   (, now_ms for tests)]; it returns [allowed 0/1, remaining, retryAfterMs, resetAfterMs].
-        raise NotImplementedError("TODO(phase-3 M3): RedisStore.check")
+        script = self._token_bucket if policy.algorithm == TOKEN_BUCKET else self._sliding_window
+        key_list = [keys.limiter_key(tenant_id, policy.algorithm, resource), keys.usage_key(tenant_id)]
+        args = [policy.limit, policy.window_ms, cost] + ([now_ms] if now_ms is not None else [])
+        allowed, remaining, retry, reset = self._call(lambda: script(keys=key_list, args=args))
+        return Decision(allowed == 1, int(remaining), int(retry), int(reset))
 
     def usage(self, tenant_id: str, minutes: int) -> list[UsagePoint]:
-        # TODO(phase-3 M3): TIME gives Redis' clock; HGETALL the ring; for each of the last n
-        #   minutes slot = usage_slot(minute): use a<slot>/d<slot> only if m<slot> == minute, else
-        #   zeros. Oldest first.
-        raise NotImplementedError("TODO(phase-3 M3): RedisStore.usage")
+        def run():
+            seconds, micros = self.r.time()
+            current = (seconds * 1000 + micros // 1000) // 60_000
+            ring = self.r.hgetall(keys.usage_key(tenant_id))
+            out = []
+            for minute in range(current - minutes + 1, current + 1):
+                slot = keys.usage_slot(minute)
+                if ring.get(f"m{slot}") == str(minute):
+                    out.append(UsagePoint(minute, int(ring.get(f"a{slot}", 0)), int(ring.get(f"d{slot}", 0))))
+                else:
+                    out.append(UsagePoint(minute, 0, 0))
+            return out
+
+        return self._call(run)

@@ -14,18 +14,6 @@ from app.store import InMemoryStore
 # watch the tests fail (red), implement until they pass (green). See docs/phase-3.
 # ---------------------------------------------------------------------------
 PENDING: dict[str, str] = {
-    "test_validation.py": "Phase 3 M1 - validation",
-    "test_security.py": "Phase 3 M1 - API keys and the admin token",
-    "test_token_bucket.py": "Phase 3 M2 - token bucket",
-    "test_sliding_window.py": "Phase 3 M2 - sliding window counter",
-    "test_memory_store.py": "Phase 3 M2 - the in-memory store on your algorithms",
-    "test_keys.py": "Phase 3 M3 - Redis key layout",
-    "test_tenants.py": "Phase 3 M4 - TenantService",
-    "test_limiter.py": "Phase 3 M4 - LimiterService",
-    "test_api_admin.py": "Phase 3 M4 - admin endpoints",
-    "test_api_limits.py": "Phase 3 M4 - limiter endpoints",
-    "test_advisor.py": "Phase 3 M5 - usage stats and the rule advisor",
-    "test_api_advice.py": "Phase 3 M5 - advice endpoint",
     "test_redis_integration.py": "Phase 4 - integration tests",
 }
 

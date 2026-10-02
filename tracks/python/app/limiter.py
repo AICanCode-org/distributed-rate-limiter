@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
-from .errors import ApiError
+import math
+
+from . import validation as v
+from .errors import ApiError, StoreUnavailable, cost_exceeds_limit, limiter_unavailable, rate_limited
 from .models import Tenant, Verdict
 from .store import Store
 
@@ -10,8 +13,7 @@ DEMO_RESOURCE = "demo"
 
 
 def seconds_up(ms: int) -> int:
-    # TODO(phase-3 M4): ms -> whole seconds, rounded UP (1 ms -> 1 s, 0 -> 0).
-    raise NotImplementedError("TODO(phase-3 M4): seconds_up")
+    return math.ceil(ms / 1000)
 
 
 class LimiterService:
@@ -20,29 +22,40 @@ class LimiterService:
 
     def check(self, tenant: Tenant, payload: object) -> Verdict:
         """POST /limits/check: the decision API other services call before doing the work."""
-        # TODO(phase-3 M4): POST /limits/check body: missing/null -> {}; otherwise an object with
-        #   optional resource and cost (validation); then decide().
-        raise NotImplementedError("TODO(phase-3 M4): LimiterService.check")
+        body = {} if payload is None else v.require_object(payload)
+        resource = v.resource(body.get("resource"))
+        cost = v.cost(body.get("cost"))
+        return self.decide(tenant, resource, cost)
 
     def decide(self, tenant: Tenant, resource: str, cost: int) -> Verdict:
-        # TODO(phase-3 M4): cost above the tenant's limit -> 422 cost-exceeds-limit (it could never
-        #   be allowed); ask the store; StoreUnavailable -> 503 limiter-unavailable (fail CLOSED,
-        #   ADR-0004).
-        raise NotImplementedError("TODO(phase-3 M4): LimiterService.decide")
+        if cost > tenant.policy.limit:
+            raise cost_exceeds_limit(cost, tenant.policy.limit)
+        try:
+            decision = self.store.check(tenant.id, resource, tenant.policy, cost)
+        except StoreUnavailable:
+            # v1.0 fails CLOSED: without its store the limiter cannot promise anything (ADR-0004).
+            raise limiter_unavailable() from None
+        return Verdict(tenant, resource, cost, decision)
 
     def enforce(self, tenant: Tenant, resource: str = DEMO_RESOURCE) -> Verdict:
         """Middleware style: a denied request becomes a 429 problem with Retry-After."""
-        # TODO(phase-3 M4): decide(tenant, resource, cost 1); denied -> raise too_many(verdict).
-        raise NotImplementedError("TODO(phase-3 M4): LimiterService.enforce")
+        verdict = self.decide(tenant, resource, 1)
+        if not verdict.decision.allowed:
+            raise self.too_many(verdict)
+        return verdict
 
     @staticmethod
     def too_many(verdict: Verdict) -> ApiError:
-        # TODO(phase-3 M4): 429 rate-limited with the X-RateLimit-* headers and Retry-After = max(1,
-        #   seconds_up(retryAfterMs)).
-        raise NotImplementedError("TODO(phase-3 M4): LimiterService.too_many")
+        retry_s = max(1, seconds_up(verdict.decision.retry_after_ms))
+        headers = {**rate_limit_headers(verdict), "Retry-After": str(retry_s)}
+        policy = verdict.tenant.policy
+        return rate_limited(policy.limit, policy.window_seconds, retry_s, headers)
 
 
 def rate_limit_headers(verdict: Verdict) -> dict[str, str]:
-    # TODO(phase-3 M4): X-RateLimit-Limit (the policy limit), X-RateLimit-Remaining, X-RateLimit-
-    #   Reset (seconds_up(resetAfterMs)).
-    raise NotImplementedError("TODO(phase-3 M4): rate_limit_headers")
+    d = verdict.decision
+    return {
+        "X-RateLimit-Limit": str(verdict.tenant.policy.limit),
+        "X-RateLimit-Remaining": str(d.remaining),
+        "X-RateLimit-Reset": str(seconds_up(d.reset_after_ms)),
+    }
