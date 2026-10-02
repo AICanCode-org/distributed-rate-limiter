@@ -56,6 +56,7 @@ describe("validation", () => {
       algorithm: "SLIDING_WINDOW",
       limit: 100,
       windowSeconds: 60,
+      failMode: "CLOSED",
     });
     expect(v.policy({ algorithm: "TOKEN_BUCKET", limit: 100_000, windowSeconds: 86_400 }).limit).toBe(
       100_000,

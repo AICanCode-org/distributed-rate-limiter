@@ -29,7 +29,9 @@ describe("limits API", () => {
       remaining: 3,
       resetAfterMs: 24_000,
       retryAfterMs: 0,
+      degraded: false,
     });
+    expect(r.headers["x-ratelimit-degraded"]).toBeUndefined();
     expect(r.headers["x-ratelimit-limit"]).toBe("5");
     expect(r.headers["x-ratelimit-remaining"]).toBe("3");
     expect(r.headers["x-ratelimit-reset"]).toBe("24");

@@ -32,7 +32,7 @@ describe("admin API", () => {
     expect(r.json()).toEqual({
       id: "acme",
       name: "Acme Corp",
-      policy: { algorithm: "TOKEN_BUCKET", limit: 5, windowSeconds: 60 },
+      policy: { algorithm: "TOKEN_BUCKET", limit: 5, windowSeconds: 60, failMode: "CLOSED" },
       keyPrefix: "rg_000000",
       createdAt: "2026-10-02T09:30:00.000Z",
       updatedAt: "2026-10-02T09:30:00.000Z",
@@ -127,7 +127,12 @@ describe("admin API", () => {
       windowSeconds: 3600,
     });
     expect(r.statusCode).toBe(200);
-    expect(r.json().policy).toEqual({ algorithm: "SLIDING_WINDOW", limit: 100, windowSeconds: 3600 });
+    expect(r.json().policy).toEqual({
+      algorithm: "SLIDING_WINDOW",
+      limit: 100,
+      windowSeconds: 3600,
+      failMode: "CLOSED", // v1.1: the default when a v1.0 client leaves it out
+    });
     expect(r.json().updatedAt).toBe("2026-10-02T09:31:00.000Z");
     const bad = await api.admin("PUT", "/api/v1/admin/tenants/acme/policy", { algorithm: "TOKEN_BUCKET" });
     expect(bad.statusCode).toBe(400);

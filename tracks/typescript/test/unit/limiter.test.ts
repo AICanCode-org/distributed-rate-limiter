@@ -12,7 +12,7 @@ const NOW = new Date("2026-10-02T09:30:00.000Z");
 const tenant = (limit = 3, windowSeconds = 60, algorithm: Algorithm = "TOKEN_BUCKET"): Tenant => ({
   id: "acme",
   name: "Acme Corp",
-  policy: { algorithm, limit, windowSeconds },
+  policy: { algorithm, limit, windowSeconds, failMode: "CLOSED" },
   keyHash: "h",
   keyPrefix: "rg_000000",
   createdAt: NOW,

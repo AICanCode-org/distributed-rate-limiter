@@ -23,10 +23,20 @@ describe("advice API", () => {
     expect(r.statusCode).toBe(200);
     const body = r.json();
     expect([body.tenantId, body.provider, body.fallback]).toEqual(["acme", "rules", false]);
-    expect(body.currentPolicy).toEqual({ algorithm: "TOKEN_BUCKET", limit: 2, windowSeconds: 3600 });
+    expect(body.currentPolicy).toEqual({
+      algorithm: "TOKEN_BUCKET",
+      limit: 2,
+      windowSeconds: 3600,
+      failMode: "CLOSED",
+    });
     expect([body.stats.allowed, body.stats.denied, body.stats.minutes]).toEqual([2, 3, 10]);
     expect(body.action).toBe("RAISE_LIMIT");
-    expect(body.suggestedPolicy).toEqual({ algorithm: "TOKEN_BUCKET", limit: 20, windowSeconds: 3600 });
+    expect(body.suggestedPolicy).toEqual({
+      algorithm: "TOKEN_BUCKET",
+      limit: 20,
+      windowSeconds: 3600,
+      failMode: "CLOSED",
+    });
     expect(body.summary.startsWith("60% of requests were denied (3 of 5).")).toBe(true);
     expect(body.generatedAt).toBe("2026-10-02T09:30:00.000Z");
     // nothing was applied

@@ -26,7 +26,12 @@ describe("tenant service", () => {
     expect(key).toBe("rg_00000000000000000000000000000001");
     expect(tenant.keyHash).toBe(hashApiKey(key));
     expect(tenant.keyPrefix).toBe("rg_000000");
-    expect(tenant.policy).toEqual({ algorithm: "TOKEN_BUCKET", limit: 5, windowSeconds: 60 });
+    expect(tenant.policy).toEqual({
+      algorithm: "TOKEN_BUCKET",
+      limit: 5,
+      windowSeconds: 60,
+      failMode: "CLOSED",
+    });
     expect(JSON.stringify(await store.listTenants())).not.toContain(key);
   });
 
@@ -54,7 +59,12 @@ describe("tenant service", () => {
     await svc.create(BODY);
     clock.advance({ minutes: 5 });
     const t = await svc.setPolicy("acme", { algorithm: "SLIDING_WINDOW", limit: 50, windowSeconds: 10 });
-    expect(t.policy).toEqual({ algorithm: "SLIDING_WINDOW", limit: 50, windowSeconds: 10 });
+    expect(t.policy).toEqual({
+      algorithm: "SLIDING_WINDOW",
+      limit: 50,
+      windowSeconds: 10,
+      failMode: "CLOSED",
+    });
     expect(t.updatedAt.getTime()).toBeGreaterThan(t.createdAt.getTime());
     expect((await svc.get("acme")).policy.limit).toBe(50);
   });
@@ -82,7 +92,12 @@ describe("tenant service", () => {
   it("deletes and resets", async () => {
     const { svc, store } = setup();
     await svc.create(BODY);
-    await store.check("acme", "x", { algorithm: "TOKEN_BUCKET", limit: 5, windowSeconds: 60 }, 5);
+    await store.check(
+      "acme",
+      "x",
+      { algorithm: "TOKEN_BUCKET", limit: 5, windowSeconds: 60, failMode: "CLOSED" },
+      5,
+    );
     expect(await svc.reset("acme")).toBe(1);
     await svc.delete("acme");
     expect(await statusOf(svc.get("acme"))).toEqual([404, "not-found"]);

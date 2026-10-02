@@ -6,6 +6,8 @@ export interface Settings {
   port: number;
   redisUrl: string;
   redisTimeoutMs: number;
+  /** v1.1: how long the Redis circuit stays open before one trial call */
+  redisBreakerCooldownMs: number;
   luaDir: string;
   /** null -> a random per-process token (the admin API is locked, logged as a warning) */
   adminToken: string | null;
@@ -25,6 +27,7 @@ export function loadSettings(env: NodeJS.ProcessEnv = process.env): Settings {
     port: Number(env.PORT ?? 8080),
     redisUrl: env.REDIS_URL ?? "redis://localhost:6379/0",
     redisTimeoutMs: Number(env.REDIS_TIMEOUT_MS ?? 1000),
+    redisBreakerCooldownMs: Number(env.REDIS_BREAKER_COOLDOWN_MS ?? 5000),
     luaDir: env.LUA_DIR || defaultLuaDir,
     adminToken: env.ADMIN_TOKEN || null,
     aiProvider: (env.AI_PROVIDER ?? "offline").toLowerCase() === "llm" ? "llm" : "offline",

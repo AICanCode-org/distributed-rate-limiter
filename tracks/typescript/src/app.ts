@@ -1,5 +1,6 @@
 // HTTP layer (Fastify). Thin: read the request, call a service, shape the JSON, map errors.
 import Fastify, {
+  LogController,
   type FastifyInstance,
   type FastifyReply,
   type FastifyRequest,
@@ -9,7 +10,9 @@ import { statsJson, summarize, type AdvisorService } from "./advisor.js";
 import { iso, isoMs, type Clock } from "./clock.js";
 import { ApiError, limiterUnavailable, notFound, StoreUnavailable, validationError } from "./errors.js";
 import { rateLimitHeaders, type LimiterService } from "./limiter.js";
+import type { Metrics } from "./metrics.js";
 import type { Policy, Tenant, Verdict } from "./models.js";
+import { incomingOrNewId, REQUEST_ID_HEADER } from "./observability.js";
 import type { AdminAuth } from "./security.js";
 import type { Store } from "./store.js";
 import type { TenantService } from "./tenants.js";
@@ -24,6 +27,7 @@ export interface AppDeps {
   advisor: AdvisorService;
   clock: Clock;
   warn: (msg: string) => void;
+  metrics: Metrics;
 }
 
 // ---- JSON shapes (identical in every track, see spec/openapi.yaml) ------------------------------
@@ -31,6 +35,7 @@ export const policyJson = (p: Policy) => ({
   algorithm: p.algorithm,
   limit: p.limit,
   windowSeconds: p.windowSeconds,
+  failMode: p.failMode,
 });
 
 export const tenantJson = (t: Tenant) => ({
@@ -52,6 +57,7 @@ export const verdictJson = (x: Verdict) => ({
   remaining: x.decision.remaining,
   resetAfterMs: x.decision.resetAfterMs,
   retryAfterMs: x.decision.retryAfterMs,
+  degraded: x.decision.degraded ?? false,
 });
 
 type Params = Record<string, string>;
@@ -71,8 +77,17 @@ function sendProblem(reply: FastifyReply, err: ApiError) {
 }
 
 export function buildApp(deps: AppDeps, opts: FastifyServerOptions = {}): FastifyInstance {
-  const app = Fastify(opts);
-  const { store, admin, tenants, limiter, advisor, clock, warn } = deps;
+  const app = Fastify({
+    // Request IDs (v1.1): one ID per request, echoed back and attached to every log line.
+    requestIdHeader: false,
+    genReqId: (req) => incomingOrNewId(req.headers[REQUEST_ID_HEADER]),
+    logController: new LogController({ requestIdLogLabel: "requestId" }),
+    ...opts,
+  });
+  app.addHook("onSend", async (request, reply) => {
+    reply.header(REQUEST_ID_HEADER, request.id);
+  });
+  const { store, admin, tenants, limiter, advisor, clock, warn, metrics } = deps;
   const asAdmin = (req: FastifyRequest) => {
     admin.require(req.headers.authorization);
     return tenants;
@@ -97,12 +112,12 @@ export function buildApp(deps: AppDeps, opts: FastifyServerOptions = {}): Fastif
   app.setNotFoundHandler((_req, reply) => sendProblem(reply, notFound("route")));
 
   // ---- ops -----------------------------------------------------------------
-  app.get("/health", async (_req, reply) => {
+  app.get("/health", async () => {
+    // v1.1: without Redis the app still answers (from each tenant's failMode): DEGRADED, not down.
     const up = await store.ping();
-    return reply
-      .code(up ? 200 : 503)
-      .send({ status: up ? "UP" : "DOWN", checks: { redis: up ? "UP" : "DOWN" } });
+    return { status: up ? "UP" : "DEGRADED", checks: { redis: up ? "UP" : "DOWN" } };
   });
+  app.get("/metrics", async (_req, reply) => reply.type("text/plain; version=0.0.4").send(metrics.render()));
 
   // ---- admin: tenants ------------------------------------------------------
   app.post("/api/v1/admin/tenants", async (req, reply) => {
@@ -145,6 +160,7 @@ export function buildApp(deps: AppDeps, opts: FastifyServerOptions = {}): Fastif
     const [tenant, , points] = await asAdmin(req).usage(id(req), queryParam(req, "minutes"));
     const stats = summarize(tenant.policy, points);
     const result = await advisor.advise(tenant, stats);
+    if (result.fallback) metrics.inc("rateguard_ai_fallback_total");
     const a = result.advice;
     return {
       tenantId: tenant.id,

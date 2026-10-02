@@ -8,8 +8,8 @@ import { FakeClock } from "../helpers.js";
 import { pendingDescribe } from "../pending.js";
 
 const describe = pendingDescribe("memory-store");
-const TB: Policy = { algorithm: "TOKEN_BUCKET", limit: 2, windowSeconds: 60 };
-const SW: Policy = { algorithm: "SLIDING_WINDOW", limit: 2, windowSeconds: 60 };
+const TB: Policy = { algorithm: "TOKEN_BUCKET", limit: 2, windowSeconds: 60, failMode: "CLOSED" };
+const SW: Policy = { algorithm: "SLIDING_WINDOW", limit: 2, windowSeconds: 60, failMode: "CLOSED" };
 const NOW = new Date("2026-10-02T09:30:00.000Z");
 const tenant = (id = "acme", keyHash = "h1"): Tenant => ({
   id,

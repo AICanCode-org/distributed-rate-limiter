@@ -6,6 +6,7 @@
 // the allowed range or a missing summary -> fall back to the rules (fallback=true). A suggestion is
 // never applied automatically: the admin reads it and decides with PUT /policy (human in the loop).
 // The LLM is any OpenAI-compatible /chat/completions endpoint: Ollama locally, or a free Gemini/Groq key.
+import type { CircuitBreaker } from "./breaker.js";
 import { isoMs } from "./clock.js";
 import type { Policy, Tenant, UsagePoint } from "./models.js";
 import { MAX_LIMIT } from "./validation.js";
@@ -256,6 +257,18 @@ export class LlmAdvisor {
     };
     const answer = await this.client.chat(SYSTEM_PROMPT, `<stats>${JSON.stringify(facts)}</stats>`, 300);
     return parseAdvice(answer, p);
+  }
+}
+
+/** v1.1: the LLM behind a circuit breaker, so a dead LLM costs one fast failure, not a timeout per call. */
+export class BreakerChat implements Chat {
+  constructor(
+    private readonly client: Chat,
+    private readonly breaker: CircuitBreaker,
+  ) {}
+
+  chat(system: string, user: string, maxTokens: number): Promise<string> {
+    return this.breaker.call(() => this.client.chat(system, user, maxTokens));
   }
 }
 

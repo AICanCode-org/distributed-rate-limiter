@@ -17,7 +17,7 @@ import { pendingDescribe } from "../pending.js";
 
 const describe = pendingDescribe("advisor");
 const M0 = 1_790_933_400_000 / 60_000; // 2026-10-02T09:30Z as an epoch minute
-const TB10: Policy = { algorithm: "TOKEN_BUCKET", limit: 10, windowSeconds: 60 };
+const TB10: Policy = { algorithm: "TOKEN_BUCKET", limit: 10, windowSeconds: 60, failMode: "CLOSED" };
 const NOW = new Date("2026-10-02T09:30:00.000Z");
 
 const pts = (...counts: [number, number][]): UsagePoint[] =>
@@ -59,7 +59,10 @@ describe("advisor", () => {
   });
 
   it("summarizes no traffic", () => {
-    const s = summarize({ algorithm: "SLIDING_WINDOW", limit: 1, windowSeconds: 3600 }, pts([0, 0], [0, 0]));
+    const s = summarize(
+      { algorithm: "SLIDING_WINDOW", limit: 1, windowSeconds: 3600, failMode: "CLOSED" },
+      pts([0, 0], [0, 0]),
+    );
     expect([s.allowed + s.denied, s.peak, s.peakMinute, s.median, s.p90, s.deniedPercent]).toEqual([
       0,
       0,
@@ -117,17 +120,23 @@ describe("advisor", () => {
 
   it("scales a raise to the window and caps it at ten times", () => {
     expect(
-      advise({ algorithm: "TOKEN_BUCKET", limit: 100, windowSeconds: 3600 }, pts(...times(10, [1, 2]))).limit,
+      advise(
+        { algorithm: "TOKEN_BUCKET", limit: 100, windowSeconds: 3600, failMode: "CLOSED" },
+        pts(...times(10, [1, 2])),
+      ).limit,
     ).toBe(216);
     expect(
-      advise({ algorithm: "TOKEN_BUCKET", limit: 1, windowSeconds: 60 }, pts(...times(10, [1, 49]))).limit,
+      advise(
+        { algorithm: "TOKEN_BUCKET", limit: 1, windowSeconds: 60, failMode: "CLOSED" },
+        pts(...times(10, [1, 49])),
+      ).limit,
     ).toBe(10);
   });
 
   it("skips a raise at the maximum limit", () => {
     expect(
       advise(
-        { algorithm: "TOKEN_BUCKET", limit: 100_000, windowSeconds: 60 },
+        { algorithm: "TOKEN_BUCKET", limit: 100_000, windowSeconds: 60, failMode: "CLOSED" },
         pts(...times(3, [100_000, 30_000])),
       ).action,
     ).toBe("KEEP");
@@ -135,7 +144,10 @@ describe("advisor", () => {
 
   it("lowers a limit far above any use", () => {
     expect(
-      advise({ algorithm: "SLIDING_WINDOW", limit: 1000, windowSeconds: 60 }, pts(...times(12, [5, 0]))),
+      advise(
+        { algorithm: "SLIDING_WINDOW", limit: 1000, windowSeconds: 60, failMode: "CLOSED" },
+        pts(...times(12, [5, 0])),
+      ),
     ).toEqual({
       action: "LOWER_LIMIT",
       limit: 10,
@@ -147,8 +159,10 @@ describe("advisor", () => {
 
   it("needs enough history to lower", () => {
     expect(
-      advise({ algorithm: "SLIDING_WINDOW", limit: 1000, windowSeconds: 60 }, pts(...times(9, [5, 0])))
-        .action,
+      advise(
+        { algorithm: "SLIDING_WINDOW", limit: 1000, windowSeconds: 60, failMode: "CLOSED" },
+        pts(...times(9, [5, 0])),
+      ).action,
     ).toBe("KEEP");
   });
 

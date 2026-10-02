@@ -1,16 +1,23 @@
 // M4: tenants (the admin API's business logic) and API-key authentication.
 import type { Clock } from "./clock.js";
-import { DuplicateError, invalidApiKey, notFound, tenantExists } from "./errors.js";
+import { DuplicateError, invalidApiKey, notFound, StoreUnavailable, tenantExists } from "./errors.js";
 import type { Tenant, UsagePoint } from "./models.js";
 import { hashApiKey, keyPrefix, looksLikeApiKey, newApiKey } from "./security.js";
 import type { Store } from "./store.js";
 import * as v from "./validation.js";
 
 export class TenantService {
+  /**
+   * v1.1: the last tenant Redis returned for each key hash, used ONLY while Redis is unavailable,
+   * so a failMode can still be applied to a known tenant (ADR-0006).
+   */
+  private readonly lastKnown = new Map<string, Tenant>();
+
   constructor(
     readonly store: Store,
     private readonly clock: Clock,
     private readonly newKey: () => string = newApiKey,
+    private readonly onCreated: () => void = () => {},
   ) {}
 
   /** Returns the tenant and its API key. The key is shown ONCE; only its hash is stored. */
@@ -36,6 +43,7 @@ export class TenantService {
       if (err instanceof DuplicateError) throw tenantExists();
       throw err;
     }
+    this.onCreated();
     return [tenant, apiKey];
   }
 
@@ -88,8 +96,21 @@ export class TenantService {
   /** X-API-Key -> tenant. Malformed keys are rejected without touching Redis. */
   async authenticate(apiKey: string | undefined): Promise<Tenant> {
     if (!looksLikeApiKey(apiKey)) throw invalidApiKey();
-    const tenant = await this.store.findByKeyHash(hashApiKey(apiKey));
-    if (tenant === null) throw invalidApiKey();
+    const keyHash = hashApiKey(apiKey);
+    let tenant: Tenant | null;
+    try {
+      tenant = await this.store.findByKeyHash(keyHash);
+    } catch (err) {
+      const cached = this.lastKnown.get(keyHash);
+      // an unknown key during an outage: nothing to decide with -> 503
+      if (err instanceof StoreUnavailable && cached !== undefined) return cached;
+      throw err;
+    }
+    if (tenant === null) {
+      this.lastKnown.delete(keyHash);
+      throw invalidApiKey();
+    }
+    this.lastKnown.set(keyHash, tenant);
     return tenant;
   }
 }

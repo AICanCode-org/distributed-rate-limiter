@@ -1,6 +1,6 @@
 // M1: input validation. Every message is identical in all three tracks (clients and tests rely on them).
 import { validationError } from "./errors.js";
-import { ALGORITHMS, type Algorithm, type Policy } from "./models.js";
+import { ALGORITHMS, CLOSED, FAIL_MODES, type Algorithm, type FailMode, type Policy } from "./models.js";
 
 export const TENANT_ID_RE = /^[a-z0-9][a-z0-9-]{1,30}[a-z0-9]$/;
 export const RESOURCE_RE = /^[a-z0-9._:-]{1,64}$/;
@@ -57,7 +57,12 @@ export function policy(value: unknown): Policy {
   if (!isInt(windowSeconds) || windowSeconds < 1 || windowSeconds > MAX_WINDOW_SECONDS) {
     throw validationError("policy.windowSeconds must be an integer between 1 and 86400");
   }
-  return { algorithm: algorithm as Algorithm, limit, windowSeconds };
+  // v1.1: optional, so v1.0 clients keep working (they get CLOSED, the v1.0 behaviour)
+  const failMode = body.failMode === undefined ? CLOSED : body.failMode;
+  if (typeof failMode !== "string" || !(FAIL_MODES as readonly string[]).includes(failMode)) {
+    throw validationError("policy.failMode must be CLOSED, OPEN or LOCAL");
+  }
+  return { algorithm: algorithm as Algorithm, limit, windowSeconds, failMode: failMode as FailMode };
 }
 
 export function resource(value: unknown): string {

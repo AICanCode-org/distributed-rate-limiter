@@ -10,12 +10,13 @@ describe("health", () => {
     expect(r.json()).toEqual({ status: "UP", checks: { redis: "UP" } });
   });
 
-  it("is 503 when the store is down", async () => {
+  it("is DEGRADED but 200 when the store is down", async () => {
+    // v1.1: the app still answers from each tenant's failMode, so it should stay in the load balancer
     const store = new InMemoryStore();
     store.up = false;
     const r = await makeApp(store).inject({ method: "GET", url: "/health" });
-    expect(r.statusCode).toBe(503);
-    expect(r.json().checks.redis).toBe("DOWN");
+    expect(r.statusCode).toBe(200);
+    expect(r.json()).toEqual({ status: "DEGRADED", checks: { redis: "DOWN" } });
   });
 
   it("answers unknown routes with problem+json", async () => {

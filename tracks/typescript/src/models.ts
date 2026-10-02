@@ -4,10 +4,18 @@ export const SLIDING_WINDOW = "SLIDING_WINDOW";
 export const ALGORITHMS = [TOKEN_BUCKET, SLIDING_WINDOW] as const;
 export type Algorithm = (typeof ALGORITHMS)[number];
 
+// v1.1 (ADR-0006): what to do while Redis is unavailable.
+export const CLOSED = "CLOSED";
+export const OPEN = "OPEN";
+export const LOCAL = "LOCAL";
+export const FAIL_MODES = [CLOSED, OPEN, LOCAL] as const;
+export type FailMode = (typeof FAIL_MODES)[number];
+
 export interface Policy {
   algorithm: Algorithm;
   limit: number;
   windowSeconds: number;
+  failMode: FailMode;
 }
 
 export const windowMs = (p: Policy) => p.windowSeconds * 1000;
@@ -28,6 +36,8 @@ export interface Decision {
   remaining: number;
   retryAfterMs: number;
   resetAfterMs: number;
+  /** v1.1: decided by the failMode because Redis was unavailable */
+  degraded?: boolean;
 }
 
 /** A decision plus what it was about (what the HTTP layer renders). */

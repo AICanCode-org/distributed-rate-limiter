@@ -1,6 +1,6 @@
 {
   "name": "rateguard-typescript",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "RateGuard distributed rate limiter - TypeScript/Node (Fastify) track (AiCanCode)",
   "private": true,
   "type": "module",

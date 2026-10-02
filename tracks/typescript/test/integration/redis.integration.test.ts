@@ -6,15 +6,16 @@ import { slidingWindow, tokenBucket } from "../../src/algorithms.js";
 import { loadSettings } from "../../src/config.js";
 import { DuplicateError, StoreUnavailable } from "../../src/errors.js";
 import type { Algorithm, Policy, Tenant } from "../../src/models.js";
+import { Metrics } from "../../src/metrics.js";
 import { RedisStore } from "../../src/store.js";
-import { ADMIN, Api, makeApp } from "../helpers.js";
+import { ADMIN, Api, makeApp, testSettings } from "../helpers.js";
 import { pendingDescribe } from "../pending.js";
 
 const describe = pendingDescribe("integration");
 const URL = process.env.TEST_REDIS_URL ?? "redis://localhost:6379/15";
 const LUA = loadSettings().luaDir;
 const NOW = new Date("2026-10-02T09:30:00.000Z");
-const TB5: Policy = { algorithm: "TOKEN_BUCKET", limit: 5, windowSeconds: 60 };
+const TB5: Policy = { algorithm: "TOKEN_BUCKET", limit: 5, windowSeconds: 60, failMode: "CLOSED" };
 const tenant = (id = "acme", keyHash = "h1", policy: Policy = TB5): Tenant => ({
   id,
   name: "Acme Corp",
@@ -65,7 +66,7 @@ describe("RedisStore and the Lua scripts", () => {
     expect(await store.findByKeyHash("nope")).toBeNull();
     const rotated: Tenant = {
       ...t,
-      policy: { algorithm: "SLIDING_WINDOW", limit: 9, windowSeconds: 10 },
+      policy: { algorithm: "SLIDING_WINDOW", limit: 9, windowSeconds: 10, failMode: "CLOSED" },
       keyHash: "h2",
       keyPrefix: "rg_111111",
     };
@@ -91,7 +92,7 @@ describe("RedisStore and the Lua scripts", () => {
     "agrees with the pure function step by step (%s)",
     async (algorithm) => {
       const pick = rng(42);
-      const policy: Policy = { algorithm, limit: 7, windowSeconds: 3 };
+      const policy: Policy = { algorithm, limit: 7, windowSeconds: 3, failMode: "CLOSED" };
       let now = 1_790_933_400_000;
       let state: never | null = null;
       for (let i = 0; i < 400; i++) {
@@ -110,7 +111,7 @@ describe("RedisStore and the Lua scripts", () => {
   it.each<Algorithm>(["TOKEN_BUCKET", "SLIDING_WINDOW"])(
     "never exceeds the limit under concurrency (%s)",
     async (algorithm) => {
-      const policy: Policy = { algorithm, limit: 10, windowSeconds: 60 };
+      const policy: Policy = { algorithm, limit: 10, windowSeconds: 60, failMode: "CLOSED" };
       const stores = Array.from({ length: 5 }, open);
       const results = await Promise.all(
         Array.from({ length: 60 }, (_, i) => stores[i % 5]!.check("acme", "x", policy, 1)),
@@ -121,7 +122,7 @@ describe("RedisStore and the Lua scripts", () => {
 
   it("shares one limit between two app instances", async () => {
     const other = open(); // its own connection, like a second container
-    const policy: Policy = { algorithm: "TOKEN_BUCKET", limit: 6, windowSeconds: 60 };
+    const policy: Policy = { algorithm: "TOKEN_BUCKET", limit: 6, windowSeconds: 60, failMode: "CLOSED" };
     let allowed = 0;
     for (let i = 0; i < 12; i++)
       if ((await (i % 2 ? store : other).check("acme", "x", policy, 1)).allowed) allowed++;
@@ -129,8 +130,18 @@ describe("RedisStore and the Lua scripts", () => {
   });
 
   it("gives every key a TTL and records usage", async () => {
-    await store.check("acme", "x", { algorithm: "TOKEN_BUCKET", limit: 5, windowSeconds: 60 }, 1);
-    await store.check("acme", "y", { algorithm: "SLIDING_WINDOW", limit: 5, windowSeconds: 60 }, 1);
+    await store.check(
+      "acme",
+      "x",
+      { algorithm: "TOKEN_BUCKET", limit: 5, windowSeconds: 60, failMode: "CLOSED" },
+      1,
+    );
+    await store.check(
+      "acme",
+      "y",
+      { algorithm: "SLIDING_WINDOW", limit: 5, windowSeconds: 60, failMode: "CLOSED" },
+      1,
+    );
     const tb = await store.redis.pttl("rg:{acme}:tb:x");
     const sw = await store.redis.pttl("rg:{acme}:sw:y");
     const usage = await store.redis.pttl("rg:{acme}:usage");
@@ -142,7 +153,7 @@ describe("RedisStore and the Lua scripts", () => {
   });
 
   it("reads the usage ring for the current minutes", async () => {
-    const policy: Policy = { algorithm: "TOKEN_BUCKET", limit: 1, windowSeconds: 3600 };
+    const policy: Policy = { algorithm: "TOKEN_BUCKET", limit: 1, windowSeconds: 3600, failMode: "CLOSED" };
     for (let i = 0; i < 3; i++) await store.check("acme", "x", policy, 1);
     const points = await store.usage("acme", 120);
     expect(points).toHaveLength(120);
@@ -152,7 +163,7 @@ describe("RedisStore and the Lua scripts", () => {
   });
 
   it("resets one tenant only", async () => {
-    const policy: Policy = { algorithm: "TOKEN_BUCKET", limit: 1, windowSeconds: 3600 };
+    const policy: Policy = { algorithm: "TOKEN_BUCKET", limit: 1, windowSeconds: 3600, failMode: "CLOSED" };
     for (const id of ["acme", "acme-2"]) await store.check(id, "x", policy, 1);
     expect(await store.reset("acme")).toBe(1);
     expect((await store.check("acme", "x", policy, 1)).allowed).toBe(true);
@@ -161,7 +172,7 @@ describe("RedisStore and the Lua scripts", () => {
   });
 
   it("uses the Redis clock without an override", async () => {
-    const policy: Policy = { algorithm: "TOKEN_BUCKET", limit: 2, windowSeconds: 1 };
+    const policy: Policy = { algorithm: "TOKEN_BUCKET", limit: 2, windowSeconds: 1, failMode: "CLOSED" };
     const out = [];
     for (let i = 0; i < 3; i++) out.push((await store.check("acme", "x", policy, 1)).allowed);
     expect(out).toEqual([true, true, false]);
@@ -170,7 +181,7 @@ describe("RedisStore and the Lua scripts", () => {
   });
 
   it("reloads the scripts after a SCRIPT FLUSH", async () => {
-    const policy: Policy = { algorithm: "SLIDING_WINDOW", limit: 3, windowSeconds: 60 };
+    const policy: Policy = { algorithm: "SLIDING_WINDOW", limit: 3, windowSeconds: 60, failMode: "CLOSED" };
     await store.check("acme", "x", policy, 1);
     await store.redis.script("FLUSH");
     expect((await store.check("acme", "x", policy, 1)).remaining).toBe(1);
@@ -181,7 +192,12 @@ describe("RedisStore and the Lua scripts", () => {
     opened.push(dead);
     expect(await dead.ping()).toBe(false);
     await expect(
-      dead.check("acme", "x", { algorithm: "TOKEN_BUCKET", limit: 1, windowSeconds: 1 }, 1),
+      dead.check(
+        "acme",
+        "x",
+        { algorithm: "TOKEN_BUCKET", limit: 1, windowSeconds: 1, failMode: "CLOSED" },
+        1,
+      ),
     ).rejects.toBeInstanceOf(StoreUnavailable);
     await expect(dead.getTenant("acme")).rejects.toBeInstanceOf(StoreUnavailable);
   });
@@ -212,5 +228,27 @@ describe("RedisStore and the Lua scripts", () => {
     );
     expect(codes.filter((c) => c === 200)).toHaveLength(8);
     expect(codes.filter((c) => c === 429)).toHaveLength(22);
+  });
+
+  // ---- v1.1 (Phase 7) ----------------------------------------------------------------------------
+  it("stores failMode and reads a v1.0 hash as CLOSED", async () => {
+    await store.createTenant(tenant("acme", "h1", { ...TB5, failMode: "LOCAL" }));
+    expect((await store.getTenant("acme"))!.policy.failMode).toBe("LOCAL");
+    await store.redis.hdel("rg:tenant:acme", "failMode"); // what a tenant written by v1.0 looks like
+    expect((await store.getTenant("acme"))!.policy.failMode).toBe("CLOSED");
+  });
+
+  it("costs three failures on a dead Redis, then answers fast", async () => {
+    const metrics = new Metrics();
+    const dead = RedisStore.fromUrl("redis://127.0.0.1:1/0", 300, LUA);
+    opened.push(dead);
+    const app = makeApp(dead, null, undefined, testSettings({ redisTimeoutMs: 300 }), { metrics });
+    const started = Date.now();
+    for (let i = 0; i < 20; i++) {
+      expect((await app.inject({ method: "GET", url: "/health" })).json().status).toBe("DEGRADED");
+    }
+    expect(Date.now() - started).toBeLessThan(5000);
+    expect(metrics.value("rateguard_store_errors_total")).toBe(3);
+    expect(metrics.value("rateguard_store_short_circuits_total")).toBe(17);
   });
 });

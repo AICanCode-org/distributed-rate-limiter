@@ -6,7 +6,7 @@ import type { Clock } from "../src/clock.js";
 import { loadSettings, type Settings } from "../src/config.js";
 import { ApiError } from "../src/errors.js";
 import type { Store } from "../src/store.js";
-import { wire } from "../src/wiring.js";
+import { wire, type WireOptions } from "../src/wiring.js";
 
 export const ADMIN_TOKEN = "test-admin-token-at-least-32-characters";
 export const ADMIN = { authorization: `Bearer ${ADMIN_TOKEN}` };
@@ -36,8 +36,11 @@ export function makeApp(
   clock: FakeClock | null = new FakeClock(),
   advisor: AdvisorService = new AdvisorService(new RuleAdvisor(), null, () => {}),
   settings: Settings = testSettings(),
+  extra: WireOptions = {},
 ): FastifyInstance {
-  return buildApp(wire(settings, store, { clock: clock?.fn, advisor, newKey: keyGen(), warn: () => {} }));
+  return buildApp(
+    wire(settings, store, { clock: clock?.fn, advisor, newKey: keyGen(), warn: () => {}, ...extra }),
+  );
 }
 
 /** Expects `promise` to reject with an ApiError and returns [status, slug]. */
@@ -67,12 +70,20 @@ export function messageOf(fn: () => unknown): string {
 export class Api {
   constructor(readonly app: FastifyInstance) {}
 
-  async tenant(id = "acme", algorithm = "TOKEN_BUCKET", limit = 5, windowSeconds = 60, name = "Acme Corp") {
+  async tenant(
+    id = "acme",
+    algorithm = "TOKEN_BUCKET",
+    limit = 5,
+    windowSeconds = 60,
+    name = "Acme Corp",
+    failMode?: string,
+  ) {
+    const policy = { algorithm, limit, windowSeconds, ...(failMode ? { failMode } : {}) };
     const r = await this.app.inject({
       method: "POST",
       url: "/api/v1/admin/tenants",
       headers: ADMIN,
-      payload: { id, name, policy: { algorithm, limit, windowSeconds } },
+      payload: { id, name, policy },
     });
     expect(r.statusCode, r.body).toBe(201);
     return r.json() as { apiKey: string; [k: string]: unknown };

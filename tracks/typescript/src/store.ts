@@ -5,10 +5,13 @@ import path from "node:path";
 import { Redis } from "ioredis";
 import { slidingWindow, tokenBucket, type BucketState, type WindowState } from "./algorithms.js";
 import { systemClock, toMs, type Clock } from "./clock.js";
+import { CircuitOpenError, type CircuitBreaker } from "./breaker.js";
 import { DuplicateError, StoreUnavailable } from "./errors.js";
 import * as keys from "./keys.js";
 import {
+  CLOSED,
   TOKEN_BUCKET,
+  type FailMode,
   windowMs,
   type Decision,
   type Policy,
@@ -150,6 +153,7 @@ export function tenantToHash(t: Tenant): Record<string, string> {
     algorithm: t.policy.algorithm,
     limit: String(t.policy.limit),
     windowSeconds: String(t.policy.windowSeconds),
+    failMode: t.policy.failMode,
     keyHash: t.keyHash,
     keyPrefix: t.keyPrefix,
     createdAt: String(toMs(t.createdAt)),
@@ -165,6 +169,8 @@ export function tenantFromHash(h: Record<string, string>): Tenant {
       algorithm: h.algorithm as Policy["algorithm"],
       limit: Number(h.limit),
       windowSeconds: Number(h.windowSeconds),
+      // A tenant written by v1.0 has no failMode: it keeps the v1.0 behaviour (CLOSED).
+      failMode: (h.failMode ?? CLOSED) as FailMode,
     },
     keyHash: h.keyHash!,
     keyPrefix: h.keyPrefix!,
@@ -343,5 +349,79 @@ export class RedisStore implements Store {
 
   async close() {
     this.redis.disconnect();
+  }
+}
+
+// ---------------------------------------------------------------------------------------------------
+/**
+ * v1.1: any store behind a circuit breaker (ADR-0006).
+ *
+ * While Redis keeps failing, every call would wait for REDIS_TIMEOUT_MS before failing. After
+ * `threshold` failures in a row the breaker opens and calls fail at once with StoreUnavailable,
+ * so the limiter can answer from the tenant's failMode in microseconds instead of seconds.
+ * DuplicateError is an answer from Redis, not a failure.
+ */
+export class GuardedStore implements Store {
+  constructor(
+    readonly inner: Store,
+    readonly breaker: CircuitBreaker,
+    private readonly onError: () => void = () => {},
+  ) {}
+
+  private async run<T>(fn: () => Promise<T>): Promise<T> {
+    try {
+      return await this.breaker.call(fn);
+    } catch (err) {
+      if (err instanceof CircuitOpenError) throw new StoreUnavailable(err.message);
+      if (err instanceof StoreUnavailable) this.onError();
+      throw err;
+    }
+  }
+
+  async ping() {
+    try {
+      return await this.run(async () => {
+        if (!(await this.inner.ping())) throw new StoreUnavailable("ping failed");
+        return true;
+      });
+    } catch {
+      return false;
+    }
+  }
+
+  createTenant(tenant: Tenant) {
+    return this.run(() => this.inner.createTenant(tenant));
+  }
+
+  getTenant(tenantId: string) {
+    return this.run(() => this.inner.getTenant(tenantId));
+  }
+
+  listTenants() {
+    return this.run(() => this.inner.listTenants());
+  }
+
+  findByKeyHash(keyHash: string) {
+    return this.run(() => this.inner.findByKeyHash(keyHash));
+  }
+
+  saveTenant(tenant: Tenant, oldKeyHash: string) {
+    return this.run(() => this.inner.saveTenant(tenant, oldKeyHash));
+  }
+
+  deleteTenant(tenant: Tenant) {
+    return this.run(() => this.inner.deleteTenant(tenant));
+  }
+
+  reset(tenantId: string) {
+    return this.run(() => this.inner.reset(tenantId));
+  }
+
+  check(tenantId: string, resource: string, policy: Policy, cost: number) {
+    return this.run(() => this.inner.check(tenantId, resource, policy, cost));
+  }
+
+  usage(tenantId: string, minutes: number) {
+    return this.run(() => this.inner.usage(tenantId, minutes));
   }
 }
