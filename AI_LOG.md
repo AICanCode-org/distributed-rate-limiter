@@ -63,3 +63,38 @@ Cursor, Claude, a local Ollama model, ...) produced something you kept, changed 
   against `spec/openapi.yaml`; each acceptance criterion maps to a test name.
 * **Time saved / lost (honest guess):** saved ~1 h of writing; the cross-check took 15 minutes.
 * **What I learned:** requirements and contract drift apart within one draft. Check names, not just ideas.
+
+### 2026-10-02 · Phase 3 · A starter that could not even start
+* **Tool / model:** AI coding agent
+* **Prompt (summary):**
+  > Generate the starter stubs from the reference code: every method body becomes `TODO(phase-3 Mx)` with a one-line hint.
+* **What it produced:** stubs in all three tracks that compiled. But the Redis store's constructor loads
+  `spec/lua/*.lua`, and on `main` those scripts do not exist yet (students write them in Phase 2). Every
+  starter would have crashed at boot with "file not found", so Phase 0 would have failed for everyone.
+* **What I kept / changed / rejected and why:** kept the generated stubs; in the starter the constructor
+  no longer loads the scripts and carries a `TODO(phase-3 M3)` to do it. Rejected the alternative of
+  shipping placeholder Lua files on `main`, which would give away the calling convention's answers and
+  make "the scripts exist" a lie.
+* **How I verified it:** a boot script starts each starter with `LUA_DIR` pointing at an empty folder and
+  checks `/health` (`200 {"status":"UP","checks":{"redis":"UP"}}` in all three tracks; creating a tenant
+  answers `500 application/problem+json` until M1 is done).
+* **Time saved / lost (honest guess):** generation saved hours; this review took 15 minutes.
+* **What I learned:** anything a constructor reads runs before any test can be skipped. Boot the starter, don't just compile it.
+
+### 2026-10-02 · Phase 3 · Lint fixes that would have deleted the exercise
+* **Tool / model:** AI coding agent + `ruff --fix`, ESLint
+* **Prompt (summary):**
+  > The generated starters fail lint with unused imports and unused declarations. Fix it.
+* **What it produced:** `ruff --fix` removed the Python imports that only the stubbed bodies used (correct:
+  students add them back as they implement). For TypeScript it proposed deleting the fence-stripping
+  helper of the LLM advisor and the type of a loaded Lua script, which looked unused once the bodies
+  calling them were stubs.
+* **What I kept / changed / rejected and why:** kept the Python fix; rejected the TypeScript deletions,
+  because M3 (the Redis store) and M5 (the LLM advisor) need them. They are exported instead
+  (`stripFences`, `LimiterScript`), which satisfies the linter without removing code students rely on.
+* **How I verified it:** lint is clean in all three starters; only the `/health` tests run and the rest are
+  reported as pending (Python 3 passed / 162 skipped, TypeScript 3 / 129, Java 2 run / 117 skipped); every
+  `TODO(phase-3 Mx)` hint was compared with the tests of its class. The hint generator itself reported
+  three methods without a hint (`Keys.tenant`, `Keys.apiKey`, `UsageStats.toJson`), which were added.
+* **Time saved / lost (honest guess):** neutral.
+* **What I learned:** "unused" is relative to the current state of the code. A starter is deliberately incomplete.
